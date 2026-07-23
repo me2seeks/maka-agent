@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Maka 麦克风权限验证器</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">MAKA DESKTOP DIAGNOSTIC</p>
+        <h1>麦克风权限验证器</h1>
+        <p class="lede">
+          复现 Voice 页面的 48 kHz / 单声道 / 约 2 秒 MediaRecorder 自检。
+          应用代码不保存、不播放、不上传音频；报告不含设备名称或 ID。
+        </p>
+      </header>
+
+      <section class="card" aria-labelledby="environment-title">
+        <div class="section-heading">
+          <div>
+            <p class="step">环境</p>
+            <h2 id="environment-title">分层状态</h2>
+          </div>
+          <button id="refresh" type="button">刷新状态</button>
+        </div>
+        <dl class="facts">
+          <div><dt>运行环境</dt><dd id="runtime">读取中…</dd></div>
+          <div><dt>系统权限</dt><dd id="native-status">读取中…</dd></div>
+          <div><dt>Web 权限</dt><dd id="web-status">读取中…</dd></div>
+          <div><dt>音频输入</dt><dd id="devices">读取中…</dd></div>
+          <div><dt>测试流程</dt><dd id="flow">读取中…</dd></div>
+          <div><dt>Session 策略</dt><dd id="policy">读取中…</dd></div>
+        </dl>
+        <p id="flow-note" class="note"></p>
+      </section>
+
+      <section class="card" aria-labelledby="actions-title">
+        <p class="step">操作</p>
+        <h2 id="actions-title">一次只验证一个流程</h2>
+        <div class="action-grid">
+          <article>
+            <h3>1. macOS 显式授权</h3>
+            <p>
+              仅在 <code>--flow=ask-then-capture</code> 且 macOS 下可用。
+              Windows 没有对应的 Electron 调用。
+            </p>
+            <button id="ask-mac" type="button" disabled>请求 macOS 麦克风权限</button>
+          </article>
+          <article>
+            <h3>2. Maka 风格采集</h3>
+            <p>
+              直接调用 <code>getUserMedia</code>，只在内存中统计 MediaRecorder
+              字节，约 2 秒后立即停止音轨。
+            </p>
+            <button id="capture" class="primary" type="button" disabled>
+              运行麦克风自检
+            </button>
+          </article>
+        </div>
+
+        <label class="prompt-field" for="prompt-observed">
+          你是否看到了操作系统权限弹窗？
+          <select id="prompt-observed">
+            <option value="unsure">不确定 / 尚未操作</option>
+            <option value="yes">是，看到了</option>
+            <option value="no">否，没有看到</option>
+          </select>
+        </label>
+        <p id="capture-result" class="result" aria-live="polite">尚未采集。</p>
+        <p id="status-message" class="status" aria-live="polite">正在初始化…</p>
+      </section>
+
+      <section class="card" aria-labelledby="report-title">
+        <div class="section-heading">
+          <div>
+            <p class="step">结果</p>
+            <h2 id="report-title">可回传 JSON</h2>
+          </div>
+          <button id="copy-report" type="button">复制 JSON</button>
+        </div>
+        <textarea id="report" readonly spellcheck="false" aria-label="验证结果 JSON"></textarea>
+      </section>
+
+      <section class="card legend" aria-labelledby="legend-title">
+        <p class="step">判读</p>
+        <h2 id="legend-title">两个错误不是一回事</h2>
+        <dl>
+          <div>
+            <dt><code>NotFoundError</code></dt>
+            <dd>没有找到满足约束的音频输入设备。</dd>
+          </div>
+          <div>
+            <dt><code>NotReadableError</code></dt>
+            <dd>设备存在，但系统、驱动、硬件故障或占用导致无法打开。</dd>
+          </div>
+          <div>
+            <dt><code>NotAllowedError</code></dt>
+            <dd>系统隐私设置、用户选择或 Electron Session 策略拒绝。</dd>
+          </div>
+        </dl>
+      </section>
+    </main>
+    <script type="module" src="./renderer.mjs"></script>
+  </body>
+</html>

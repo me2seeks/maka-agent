@@ -1,0 +1,23 @@
+{
+  "name": "maka-voice-permission-probe",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A local Electron probe for Maka microphone permission and capture behavior.",
+  "license": "MIT",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "start:explicit": "electron . --flow=ask-then-capture",
+    "start:allow": "electron . --session-policy=allow",
+    "start:deny": "electron . --session-policy=deny",
+    "test": "node --test test/*.test.*",
+    "package": "node pack.mjs"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "devDependencies": {
+    "@electron/packager": "20.0.4",
+    "electron": "43.1.1"
+  }
+}
