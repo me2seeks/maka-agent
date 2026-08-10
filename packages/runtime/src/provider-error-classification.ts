@@ -337,7 +337,8 @@ function isUsageLimitErrorText(text: string): boolean {
     /\b(?:plan|subscription)\b[^.\n]{0,80}\b(?:limit|quota|allowance)\b[^.\n]{0,40}\b(?:exhausted|exceeded|reached|used up)\b/i.test(
       text,
     ) ||
-    /\busage limit\b[^.\n]{0,40}\b(?:exhausted|exceeded|reached|used up)\b/i.test(text)
+    /\busage limit\b[^.\n]{0,40}\b(?:exhausted|exceeded|reached|used up)\b/i.test(text) ||
+    /\byou(?:'ve| have)\s+(?:exhausted|exceeded|reached|used up)\s+your usage limit\b/i.test(text)
   );
 }
 

@@ -566,6 +566,57 @@ describe('Provider error classification', () => {
     assert.equal(classifyError(providerError(400, 'Quota exceeded')), 'AI_APICallError');
   });
 
+  test('classifies an observed plan-cycle limit without promoting permission_error', async () => {
+    // This is the same envelope schema used by the shipped Anthropic provider.
+    // The response envelope and message are preserved from an observed failure;
+    // only the request URL is anonymized.
+    const handler = createJsonErrorResponseHandler({
+      errorSchema: z.object({
+        type: z.literal('error'),
+        error: z.object({
+          type: z.string(),
+          message: z.string(),
+        }),
+      }),
+      errorToMessage: (data) => data.error.message,
+    });
+    const errorFromResponse = async (message: string) =>
+      (
+        await handler({
+          response: new Response(
+            JSON.stringify({
+              error: { type: 'permission_error', message },
+              type: 'error',
+            }),
+            {
+              status: 403,
+              headers: { 'content-type': 'application/json; charset=utf-8' },
+            },
+          ),
+          url: 'https://api.example.test/coding/v1/messages',
+          requestBodyValues: {},
+        })
+      ).value;
+
+    const observedMessage =
+      "You've reached your usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan: https://www.kimi.com/code/#pricing";
+    const planCycleLimit = await errorFromResponse(observedMessage);
+    assert.equal(planCycleLimit.statusCode, 403);
+    assert.deepEqual(planCycleLimit.data, {
+      error: { type: 'permission_error', message: observedMessage },
+      type: 'error',
+    });
+    assert.equal(classifyError(planCycleLimit), 'UsageLimit');
+    assert.deepEqual(providerRetryMetadata(planCycleLimit), { retryable: false });
+
+    // `permission_error` is a transport envelope, not enough evidence by
+    // itself that an account exhausted a usage allowance.
+    const modelPermission = await errorFromResponse(
+      'This account cannot access the requested model.',
+    );
+    assert.equal(classifyError(modelPermission), 'AI_APICallError');
+  });
+
   test('reads OpenRouter typed errors from each documented protocol envelope', () => {
     assert.equal(
       classifyError({
