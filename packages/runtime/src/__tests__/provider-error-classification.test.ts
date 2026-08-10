@@ -6,7 +6,7 @@ import { z } from 'zod/v4';
 
 import {
   classifyError,
-  errorPresentationFromClass,
+  normalizeProviderFailure,
   providerRetryMetadata,
 } from '../provider-error-classification.js';
 
@@ -214,9 +214,8 @@ describe('Provider error classification', () => {
     assert.equal(overflow('Request Entity Too Large', { statusCode: 413 }), 'ContextLength');
     assert.equal(overflow('Payload Too Large', { statusCode: 413 }), 'ContextLength');
     assert.equal(overflow('', { statusCode: 413 }), 'ContextLength');
-    // A structured code embedded in free text must not be misread by a weaker
-    // substring heuristic checked earlier: "generate" contains "rate", and the
-    // rate/auth substring heuristics rank BELOW overflow evidence (round-7 P1-2).
+    // A structured code embedded in free text still identifies the one
+    // recoverable input-overflow relation.
     assert.equal(
       overflow('Failed to generate response: context_length_exceeded', { statusCode: 400 }),
       'ContextLength',
@@ -227,16 +226,14 @@ describe('Provider error classification', () => {
       overflow('Please rate limit your requests', { statusCode: 503 }),
       'ProviderUnavailable',
     );
-    // The weak rate heuristic is word-shaped, not a substring: "generate" and
-    // "separate" are not rate limits (review round-8 P2)…
+    // Provider prose never promotes a machine-readable rate-limit meaning.
     assert.notEqual(overflow('Failed to generate response', { statusCode: 400 }), 'RateLimit');
     assert.notEqual(
       overflow('Unable to separate response chunks', { statusCode: 400 }),
       'RateLimit',
     );
-    // …while genuine rate wording without an explicit 429 still classifies.
-    assert.equal(overflow('Please rate limit your requests', {}), 'RateLimit');
-    assert.equal(overflow('rate_limit_exceeded: slow down', {}), 'RateLimit');
+    assert.notEqual(overflow('Please rate limit your requests', {}), 'RateLimit');
+    assert.notEqual(overflow('rate_limit_exceeded: slow down', {}), 'RateLimit');
 
     // Exclusion-first: throttling/rate-limit wording must NOT be read as overflow
     // even when it superficially mentions tokens.
@@ -244,7 +241,7 @@ describe('Provider error classification', () => {
       overflow('Rate limit reached: too many tokens, please wait before trying again', {
         statusCode: 429,
       }),
-      'RateLimit',
+      'AI_APICallError',
     );
     assert.notEqual(
       overflow('ThrottlingException: too many tokens, please wait before trying again', {
@@ -480,7 +477,8 @@ describe('Provider error classification', () => {
       '{"error":{"message":"Service unavailable","code":"context_length_exceeded"}}',
     );
 
-    assert.equal(classifyError(retried(rateLimit)), 'RateLimit');
+    assert.equal(classifyError(retried(rateLimit)), 'AI_APICallError');
+    assert.deepEqual(providerRetryMetadata(retried(rateLimit)), { retryable: true });
     assert.equal(classifyError(retried(unavailable)), 'ProviderUnavailable');
     assert.equal(classifyError(retried(overflow, 'errorNotRetryable')), 'ContextLength');
 
@@ -526,17 +524,13 @@ describe('Provider error classification', () => {
     assert.equal(classifyError(insufficientQuota), 'ProviderBilling');
     assert.deepEqual(providerRetryMetadata(insufficientQuota), { retryable: false });
 
-    // Subscription products may expose a rolling allowance through a stable
-    // code or through narrow window wording. Neither is a short throttle.
-    const planUsageLimit = providerError(403, 'Your subscription usage limit has been reached');
-    const windowUsageLimit = providerError(
-      429,
-      'Your five-hour usage limit has been reached. Try again after it resets.',
-    );
+    // A typed product limit is not a short throttle even when it shares a
+    // transport status with ordinary request throttling.
+    const planUsageLimit = providerError(403, 'Your subscription usage limit has been reached', {
+      code: 'usage_limit_reached',
+    });
     assert.equal(classifyError(planUsageLimit), 'UsageLimit');
-    assert.equal(classifyError(windowUsageLimit), 'UsageLimit');
     assert.deepEqual(providerRetryMetadata(planUsageLimit), { retryable: false });
-    assert.deepEqual(providerRetryMetadata(windowUsageLimit), { retryable: false });
 
     const permission = providerError(403, 'This key cannot access the requested model', {
       type: 'permission_denied',
@@ -560,13 +554,16 @@ describe('Provider error classification', () => {
     assert.equal(classifyError(throttle), 'RateLimit');
     assert.deepEqual(providerRetryMetadata(throttle), { retryable: true });
 
+    const sdkVetoedThrottle = Object.assign(throttle, { isRetryable: false });
+    assert.deepEqual(providerRetryMetadata(sdkVetoedThrottle), { retryable: false });
+
     assert.equal(classifyError(providerError(401, 'Invalid API key')), 'Auth');
     // Do not guess whether an unstructured compatible-provider quota message
     // means credits, a subscription window, or a short provider throttle.
     assert.equal(classifyError(providerError(400, 'Quota exceeded')), 'AI_APICallError');
   });
 
-  test('classifies an observed plan-cycle limit without promoting permission_error', async () => {
+  test('keeps an observed Kimi plan response diagnostic without guessing its meaning', async () => {
     // This is the same envelope schema used by the shipped Anthropic provider.
     // The response envelope and message are preserved from an observed failure;
     // only the request URL is anonymized.
@@ -606,8 +603,13 @@ describe('Provider error classification', () => {
       error: { type: 'permission_error', message: observedMessage },
       type: 'error',
     });
-    assert.equal(classifyError(planCycleLimit), 'UsageLimit');
-    assert.deepEqual(providerRetryMetadata(planCycleLimit), { retryable: false });
+    assert.equal(classifyError(planCycleLimit), 'AI_APICallError');
+    assert.deepEqual(normalizeProviderFailure(planCycleLimit), {
+      type: 'model_failure',
+      kind: 'unknown',
+      retryable: false,
+      message: observedMessage,
+    });
 
     // `permission_error` is a transport envelope, not enough evidence by
     // itself that an account exhausted a usage allowance.
@@ -615,6 +617,10 @@ describe('Provider error classification', () => {
       'This account cannot access the requested model.',
     );
     assert.equal(classifyError(modelPermission), 'AI_APICallError');
+    assert.equal(
+      normalizeProviderFailure(modelPermission).message,
+      'This account cannot access the requested model.',
+    );
   });
 
   test('reads OpenRouter typed errors from each documented protocol envelope', () => {
@@ -652,47 +658,37 @@ describe('Provider error classification', () => {
     );
   });
 
-  test('maps provider classes to stable user-safe presentations', () => {
-    assert.deepEqual(errorPresentationFromClass('ContextLength'), {
-      reason: 'context_overflow',
-      message: 'Context window exceeded',
-    });
-    assert.deepEqual(errorPresentationFromClass('Timeout'), {
-      reason: 'timeout',
-      message: 'Request timed out',
-    });
-    assert.deepEqual(errorPresentationFromClass('Auth'), {
-      reason: 'auth',
-      message: 'Authentication failed',
-    });
-    assert.deepEqual(errorPresentationFromClass('ProviderBilling'), {
-      reason: 'provider_billing',
-      message: 'Provider billing required',
-    });
-    assert.deepEqual(errorPresentationFromClass('ProviderPermission'), {
-      reason: 'provider_permission',
-      message: 'Provider access denied',
-    });
-    assert.deepEqual(errorPresentationFromClass('ProviderUnavailable'), {
-      reason: 'provider_unavailable',
-      message: 'Provider returned an error',
-    });
-    assert.deepEqual(errorPresentationFromClass('RateLimit'), {
-      reason: 'rate_limit',
-      message: 'Rate limit exceeded',
-    });
-    assert.deepEqual(errorPresentationFromClass('UsageLimit'), {
-      reason: 'usage_limit',
-      message: 'Usage limit reached',
-    });
-    assert.deepEqual(errorPresentationFromClass('Network'), {
-      reason: 'network',
-      message: 'Network error',
-    });
-    assert.deepEqual(errorPresentationFromClass('Other'), {});
+  test('redacts and bounds the provider diagnostic independently of classification', () => {
+    const failure = normalizeProviderFailure(
+      Object.assign(new Error('generic transport message'), {
+        name: 'AI_APICallError',
+        statusCode: 403,
+        data: {
+          error: {
+            type: 'permission_error',
+            message: `Account limit reached\napi_key=sk-provider-secret ${'界'.repeat(2_100)}`,
+          },
+        },
+      }),
+    );
+
+    assert.equal(failure.kind, 'unknown');
+    assert.ok(failure.message.startsWith('Account limit reached api_key=[redacted]'));
+    assert.ok(!failure.message.includes('sk-provider-secret'));
+    assert.ok(Array.from(failure.message).length <= 2_001);
+
+    const malformedBody = normalizeProviderFailure(
+      Object.assign(new Error('Bad gateway'), {
+        name: 'AI_APICallError',
+        statusCode: 502,
+        responseBody: '<html>private upstream dump</html>',
+      }),
+    );
+    assert.equal(malformedBody.message, 'Bad gateway');
+    assert.ok(!malformedBody.message.includes('private upstream dump'));
   });
 });
-test('auth classification preserves broad provider spellings without matching authority', () => {
+test('account wording stays diagnostic-only without structured authority', () => {
   for (const message of [
     'AuthenticationError',
     'OAuth2 token expired',
@@ -700,7 +696,7 @@ test('auth classification preserves broad provider spellings without matching au
     'Please authenticate',
     'authToken is missing',
   ]) {
-    assert.equal(classifyError(new Error(message)), 'Auth');
+    assert.notEqual(classifyError(new Error(message)), 'Auth');
   }
   assert.equal(
     classifyError(new Error('Conversation copy contains durable runtime authority facts')),

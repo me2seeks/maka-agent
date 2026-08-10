@@ -6,7 +6,6 @@ import {
   type RuntimeExecutionConnection,
 } from '@maka/core/llm-connections';
 import { lookupModelMetadata } from '@maka/core/model-metadata';
-import { generalizedErrorMessage } from '@maka/core/redaction';
 import type { CacheMissInputSource } from '@maka/core/usage-stats/types';
 import { rawFinishReasonString } from './model-protocol.js';
 import type {
@@ -35,11 +34,7 @@ export type {
 } from './model-protocol.js';
 
 import { resolveModelRuntime, type ResolvedModelRuntime } from './model-runtime.js';
-import {
-  classifyError,
-  errorPresentationFromClass,
-  providerRetryMetadata,
-} from './provider-error-classification.js';
+import { classifyError, normalizeProviderFailure } from './provider-error-classification.js';
 import {
   withProviderGenerateTracking,
   type ProviderRequestTracker,
@@ -835,21 +830,7 @@ function compileProviderTool(
 
 function normalizeModelFailure(error: unknown): ModelFailure {
   if (isModelFailure(error)) return error;
-  const errorClass = classifyError(error);
-  const presentation = errorPresentationFromClass(errorClass);
-  const retry = providerRetryMetadata(error);
-  const code =
-    error instanceof Error && 'code' in error
-      ? String((error as { code?: unknown }).code)
-      : undefined;
-  return {
-    type: 'model_failure',
-    kind: modelFailureKind(errorClass),
-    retryable: retry.retryable,
-    ...(retry.retryAfterMs !== undefined ? { retryAfterMs: retry.retryAfterMs } : {}),
-    ...(code !== undefined ? { code } : {}),
-    message: presentation.message ?? generalizedErrorMessage(error),
-  };
+  return normalizeProviderFailure(error);
 }
 
 function isModelFailure(value: unknown): value is ModelFailure {
@@ -860,33 +841,6 @@ function isModelFailure(value: unknown): value is ModelFailure {
     typeof (value as { kind?: unknown }).kind === 'string' &&
     typeof (value as { message?: unknown }).message === 'string'
   );
-}
-
-function modelFailureKind(errorClass: string): ModelFailureKind {
-  switch (errorClass) {
-    case 'Abort':
-      return 'abort';
-    case 'Auth':
-      return 'auth';
-    case 'ContextLength':
-      return 'context_overflow';
-    case 'Network':
-      return 'network';
-    case 'ProviderBilling':
-      return 'provider_billing';
-    case 'ProviderPermission':
-      return 'provider_permission';
-    case 'ProviderUnavailable':
-      return 'provider_unavailable';
-    case 'RateLimit':
-      return 'rate_limit';
-    case 'Timeout':
-      return 'timeout';
-    case 'UsageLimit':
-      return 'usage_limit';
-    default:
-      return 'unknown';
-  }
 }
 
 function errorClassFromFailureKind(kind: ModelFailureKind): string {

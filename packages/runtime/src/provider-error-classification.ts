@@ -1,5 +1,7 @@
 import { RetryError } from 'ai';
-import { isAuthenticationErrorText } from '@maka/core/redaction';
+import { sanitizeUnicodeText } from '@maka/core';
+import { redactSecrets } from '@maka/core/redaction';
+import type { ModelFailure, ModelFailureKind } from './model-protocol.js';
 
 /**
  * Structured provider error identifiers that mean the INPUT exceeded the
@@ -23,6 +25,7 @@ const PROVIDER_AUTH_CODES: ReadonlySet<string> = new Set([
   'invalid_api_key',
 ]);
 const PROVIDER_PERMISSION_CODES: ReadonlySet<string> = new Set(['permission_denied']);
+const PROVIDER_USAGE_LIMIT_CODES: ReadonlySet<string> = new Set(['usage_limit_reached']);
 const PROVIDER_RATE_LIMIT_CODES: ReadonlySet<string> = new Set([
   'rate_limit_error',
   'rate_limit_exceeded',
@@ -60,6 +63,8 @@ export interface ProviderRetryMetadata {
   retryable: boolean;
   retryAfterMs?: number;
 }
+
+const PROVIDER_DIAGNOSTIC_MAX_CODE_POINTS = 2_000;
 
 const MAX_SAFE_TIMER_DELAY_MS = 2_147_483_647;
 const OPENAI_RESPONSES_WEBSOCKET_TRANSPORT_ERROR = 'OPENAI_RESPONSES_WEBSOCKET_TRANSPORT_ERROR';
@@ -124,12 +129,19 @@ export function providerRetryMetadata(error: unknown): ProviderRetryMetadata {
   ) {
     return { retryable: false };
   }
+  const sdkRetryable =
+    typeof target === 'object' &&
+    target !== null &&
+    typeof (target as { isRetryable?: unknown }).isRetryable === 'boolean'
+      ? (target as { isRetryable: boolean }).isRetryable
+      : undefined;
   const retryable =
-    errorClass === 'Network' ||
-    status === 408 ||
-    status === 409 ||
-    status === 429 ||
-    (status >= 500 && status <= 599);
+    sdkRetryable ??
+    (errorClass === 'Network' ||
+      status === 408 ||
+      status === 409 ||
+      status === 429 ||
+      (status >= 500 && status <= 599));
   if (!retryable) return { retryable: false };
 
   const retryAfterMs = parseRetryAfterMs(responseHeadersFromError(target) ?? {});
@@ -138,6 +150,83 @@ export function providerRetryMetadata(error: unknown): ProviderRetryMetadata {
     retryable: true,
     ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
   };
+}
+
+/**
+ * Closes the provider-error boundary in one place. Stable structured facts
+ * choose Runtime policy; provider wording is only a redacted, bounded
+ * diagnostic for the user and never feeds the failure kind or retry decision.
+ */
+export function normalizeProviderFailure(error: unknown): ModelFailure {
+  const errorClass = classifyError(error);
+  const retry = providerRetryMetadata(error);
+  const target = providerErrorTarget(error);
+  const code = target instanceof Error ? scalarString((target as { code?: unknown }).code) : '';
+  return {
+    type: 'model_failure',
+    kind: modelFailureKind(errorClass),
+    retryable: retry.retryable,
+    ...(retry.retryAfterMs !== undefined ? { retryAfterMs: retry.retryAfterMs } : {}),
+    ...(code ? { code } : {}),
+    message: providerDiagnosticMessage(target) ?? defaultFailureMessage(errorClass),
+  };
+}
+
+function providerDiagnosticMessage(error: unknown): string | undefined {
+  const message = extractProviderMessage(error);
+  if (!message) return undefined;
+  // Run the shared redactor over both the whole message and whitespace-delimited
+  // fragments. The second pass closes an overlap case such as
+  // `failure: token=...`, where the generic `failure:` assignment can otherwise
+  // consume the nested credential-shaped fragment before it is inspected.
+  const redacted = redactSecrets(message)
+    .split(/(\s+)/)
+    .map((fragment) => (fragment.trim() ? redactSecrets(fragment) : fragment))
+    .join('');
+  const sanitized = sanitizeUnicodeText(redacted, {
+    maxCodePoints: PROVIDER_DIAGNOSTIC_MAX_CODE_POINTS,
+  });
+  return sanitized || undefined;
+}
+
+function extractProviderMessage(value: unknown, depth = 0): string | undefined {
+  if (depth > 4) return undefined;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (parsed !== trimmed) return extractProviderMessage(parsed, depth + 1);
+    } catch {
+      // A stream error may itself be the provider's message.
+    }
+    return trimmed;
+  }
+  if (typeof value !== 'object' || value === null) return undefined;
+
+  const record = value as Record<string, unknown>;
+  if (value instanceof Error) {
+    const fromData = extractProviderMessage(record.data, depth + 1);
+    if (fromData) return fromData;
+    const responseBody = record.responseBody;
+    if (typeof responseBody === 'string') {
+      try {
+        const fromBody = extractProviderMessage(JSON.parse(responseBody), depth + 1);
+        if (fromBody) return fromBody;
+      } catch {
+        // A non-JSON response body is not a diagnostic string boundary.
+      }
+    }
+    return typeof value.message === 'string' && value.message.trim() ? value.message : undefined;
+  }
+
+  const nestedError = extractProviderMessage(record.error, depth + 1);
+  if (nestedError) return nestedError;
+  const nestedResponse = extractProviderMessage(record.response, depth + 1);
+  if (nestedResponse) return nestedResponse;
+  const nestedData = extractProviderMessage(record.data, depth + 1);
+  if (nestedData) return nestedData;
+  return typeof record.message === 'string' && record.message.trim() ? record.message : undefined;
 }
 
 /** Collects stable identifiers from the provider envelopes Maka receives. */
@@ -171,19 +260,19 @@ function collectStructuredCodes(payload: unknown, out: string[]): void {
 
 function normalizeErrorEvidence(error: unknown): ProviderErrorEvidence | undefined {
   if (error instanceof Error) {
-    const code = 'code' in error ? String((error as { code?: unknown }).code) : '';
+    const code = scalarString((error as { code?: unknown }).code);
     const statusCode =
       'statusCode' in error
-        ? String((error as { statusCode?: unknown }).statusCode)
+        ? scalarString((error as { statusCode?: unknown }).statusCode)
         : 'status' in error
-          ? String((error as { status?: unknown }).status)
+          ? scalarString((error as { status?: unknown }).status)
           : '';
     const rawBody = (error as { responseBody?: unknown }).responseBody;
     const body = typeof rawBody === 'string' ? rawBody : '';
     const structuredCodes: string[] = [];
     collectStructuredCodes(error, structuredCodes);
     collectStructuredCodes((error as { data?: unknown }).data, structuredCodes);
-    if (structuredCodes.length === 0 && body) {
+    if (body) {
       // The failed-response handler keeps the raw body even when the provider
       // JSON failed the schema (which is exactly when `data` is absent).
       try {
@@ -237,6 +326,10 @@ function normalizeErrorEvidence(error: unknown): ProviderErrorEvidence | undefin
     };
   }
   return undefined;
+}
+
+function scalarString(value: unknown): string {
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : '';
 }
 
 /**
@@ -330,23 +423,11 @@ export function isContextOverflowErrorText(text: string): boolean {
   return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(text));
 }
 
-function isUsageLimitErrorText(text: string): boolean {
-  return (
-    /\b(?:five|5)[ -]?hour(?:ly)?\b[^.\n]{0,80}\b(?:limit|quota|allowance)\b/i.test(text) ||
-    /\bweekly\b[^.\n]{0,80}\b(?:limit|quota|allowance)\b/i.test(text) ||
-    /\b(?:plan|subscription)\b[^.\n]{0,80}\b(?:limit|quota|allowance)\b[^.\n]{0,40}\b(?:exhausted|exceeded|reached|used up)\b/i.test(
-      text,
-    ) ||
-    /\busage limit\b[^.\n]{0,40}\b(?:exhausted|exceeded|reached|used up)\b/i.test(text) ||
-    /\byou(?:'ve| have)\s+(?:exhausted|exceeded|reached|used up)\s+your usage limit\b/i.test(text)
-  );
-}
-
 /**
  * Classifies a provider error by DESCENDING evidence strength over the
  * normalized evidence (Error, string, or plain stream-error-part object):
- * abort → structured account state → explicit rolling usage window → 402 →
- * 429 → 401 (numeric fields, never substrings) → the provider's structured
+ * abort → structured account state → 402 → 401 (numeric fields, never
+ * substrings) → the provider's structured
  * overflow code → bare 413 (HTTP: request entity too
  * large — itself input-side evidence, Cerebras sends it with no body) →
  * vetoable free-text overflow relations → generic 5xx → weak word
@@ -365,14 +446,10 @@ export function classifyError(error: unknown): string {
   if (structuredCodes.some((c) => PROVIDER_AUTH_CODES.has(c))) return 'Auth';
   if (structuredCodes.some((c) => PROVIDER_BILLING_CODES.has(c))) return 'ProviderBilling';
   if (structuredCodes.some((c) => PROVIDER_PERMISSION_CODES.has(c))) return 'ProviderPermission';
+  if (structuredCodes.some((c) => PROVIDER_USAGE_LIMIT_CODES.has(c))) return 'UsageLimit';
   if (structuredCodes.some((c) => PROVIDER_RATE_LIMIT_CODES.has(c))) return 'RateLimit';
   if (structuredCodes.some((c) => PROVIDER_UNAVAILABLE_CODES.has(c))) return 'ProviderUnavailable';
-  // Some subscription products expose rolling windows only in the safe error
-  // message. Keep this deliberately narrow: a bare "quota exceeded" from an
-  // unknown compatible relay is not enough to guess billing vs usage window.
-  if (isUsageLimitErrorText(text)) return 'UsageLimit';
   if (statusCode === '402' || code === '402') return 'ProviderBilling';
-  if (statusCode === '429' || code === '429') return 'RateLimit';
   if (statusCode === '401' || code === '401') return 'Auth';
   // A bare 403 is intentionally not classified: providers use it for valid-key
   // permission failures, guardrails, subscription limits, and occasionally
@@ -384,12 +461,9 @@ export function classifyError(error: unknown): string {
   // Free-text overflow relations on the composite text, veto-first inside.
   if (isContextOverflowErrorText(text)) return 'ContextLength';
   if (/^5\d\d$/.test(statusCode) || /^5\d\d$/.test(code)) return 'ProviderUnavailable';
-  // Weak word heuristics, last: they only catch errors that carried no
-  // stronger evidence for any other class. `rate` must be word-shaped
-  // ("generate"/"separate" are not rate limits) while still matching the
-  // rate_limit/RateLimitError identifier spellings.
-  if (/\brate\b|rate[_-]?limit/.test(text)) return 'RateLimit';
-  if (isAuthenticationErrorText(text)) return 'Auth';
+  // Transport-shaped wording may still identify operational failures, but
+  // account state never does: auth, billing, permission, usage, and rate-limit
+  // meanings require the structured/status facts above.
   if (text.includes('timeout')) return 'Timeout';
   if (
     text.includes('network') ||
@@ -400,30 +474,54 @@ export function classifyError(error: unknown): string {
   return classificationTarget instanceof Error ? classificationTarget.name || 'Other' : 'Other';
 }
 
-export function errorPresentationFromClass(errorClass: string): {
-  reason?: string;
-  message?: string;
-} {
+function defaultFailureMessage(errorClass: string): string {
   switch (errorClass) {
     case 'ContextLength':
-      return { reason: 'context_overflow', message: 'Context window exceeded' };
+      return 'Context window exceeded';
     case 'Timeout':
-      return { reason: 'timeout', message: 'Request timed out' };
+      return 'Request timed out';
     case 'Auth':
-      return { reason: 'auth', message: 'Authentication failed' };
+      return 'Authentication failed';
     case 'ProviderBilling':
-      return { reason: 'provider_billing', message: 'Provider billing required' };
+      return 'Provider billing required';
     case 'ProviderPermission':
-      return { reason: 'provider_permission', message: 'Provider access denied' };
+      return 'Provider access denied';
     case 'ProviderUnavailable':
-      return { reason: 'provider_unavailable', message: 'Provider returned an error' };
+      return 'Provider returned an error';
     case 'RateLimit':
-      return { reason: 'rate_limit', message: 'Rate limit exceeded' };
+      return 'Rate limit exceeded';
     case 'UsageLimit':
-      return { reason: 'usage_limit', message: 'Usage limit reached' };
+      return 'Usage limit reached';
     case 'Network':
-      return { reason: 'network', message: 'Network error' };
+      return 'Network error';
     default:
-      return {};
+      return 'Operation failed';
+  }
+}
+
+function modelFailureKind(errorClass: string): ModelFailureKind {
+  switch (errorClass) {
+    case 'Abort':
+      return 'abort';
+    case 'Auth':
+      return 'auth';
+    case 'ContextLength':
+      return 'context_overflow';
+    case 'Network':
+      return 'network';
+    case 'ProviderBilling':
+      return 'provider_billing';
+    case 'ProviderPermission':
+      return 'provider_permission';
+    case 'ProviderUnavailable':
+      return 'provider_unavailable';
+    case 'RateLimit':
+      return 'rate_limit';
+    case 'Timeout':
+      return 'timeout';
+    case 'UsageLimit':
+      return 'usage_limit';
+    default:
+      return 'unknown';
   }
 }

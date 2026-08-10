@@ -181,17 +181,17 @@ describe('ModelAdapter stream and error normalization', () => {
     assert.ok(errorEvent);
     assert.deepEqual(errorEvent.failure, {
       type: 'model_failure',
-      kind: 'rate_limit',
+      kind: 'unknown',
       code: '429',
-      message: 'Rate limit exceeded',
+      message: '429 rate limit',
       retryable: true,
     });
     // The backend consumes the typed failure without recovering the raw
     // provider error shape.
     const shaped = adapter.makeErrorEvent('turn-1', errorEvent.failure);
-    assert.equal(shaped.reason, 'rate_limit');
+    assert.equal(shaped.reason, undefined);
     assert.equal(shaped.code, '429');
-    assert.equal(shaped.message, 'Rate limit exceeded');
+    assert.equal(shaped.message, '429 rate limit');
   });
 
   test('preserves an explicit empty reasoning delta without inventing one for absent text', () => {
@@ -541,11 +541,12 @@ describe('ModelAdapter stream and error normalization', () => {
     assert.equal(adapter.makeErrorEvent('turn-1', billingError).reason, 'provider_billing');
     const usageLimitError = Object.assign(new Error('Your weekly usage limit has been reached'), {
       statusCode: 403,
+      data: { error: { code: 'usage_limit_reached' } },
     });
     const usageLimitEvent = adapter.makeErrorEvent('turn-1', usageLimitError);
     assert.equal(adapter.classifyError(usageLimitError), 'UsageLimit');
     assert.equal(usageLimitEvent.reason, 'usage_limit');
-    assert.equal(usageLimitEvent.message, 'Usage limit reached');
+    assert.equal(usageLimitEvent.message, 'Your weekly usage limit has been reached');
     assert.equal(adapter.normalizeFailure(usageLimitError).retryable, false);
     assert.equal(
       adapter.makeErrorEvent('turn-1', new Error('Model stream idle timeout after 120000ms'))
@@ -579,7 +580,7 @@ describe('ModelAdapter stream and error normalization', () => {
     const event = newAdapter().makeErrorEvent('turn-1', wrapped);
 
     assert.equal(event.reason, 'provider_unavailable');
-    assert.equal(event.message, 'Provider returned an error');
+    assert.equal(event.message, 'Service unavailable: token=[redacted]');
     assert.equal(JSON.stringify(event).includes('provider-secret'), false);
   });
 
@@ -590,7 +591,7 @@ describe('ModelAdapter stream and error normalization', () => {
     });
 
     assert.equal(event.reason, 'network');
-    assert.equal(event.message, 'Network error');
+    assert.equal(event.message, 'fetch failed');
     assert.equal(JSON.stringify(event).includes('sk-live-secret-token-value'), false);
   });
 
@@ -601,21 +602,21 @@ describe('ModelAdapter stream and error normalization', () => {
 
     assert.equal(adapter.classifyError(error), 'Error');
     assert.equal(event.reason, undefined);
-    assert.equal(event.message, 'Network error');
+    assert.equal(event.message, 'connect ECONNREFUSED 127.0.0.1:443');
   });
 
   test('projects string provider errors through the same classification', () => {
     const event = newAdapter().makeErrorEvent('turn-1', 'fetch failed');
 
     assert.equal(event.reason, 'network');
-    assert.equal(event.message, 'Network error');
+    assert.equal(event.message, 'fetch failed');
   });
 
-  test('keeps an unknown structured provider error generic', () => {
+  test('keeps an unknown structured provider error explainable', () => {
     const event = newAdapter().makeErrorEvent('turn-1', { message: 'provider exploded' });
 
     assert.equal(event.reason, undefined);
-    assert.equal(event.message, 'Operation failed');
+    assert.equal(event.message, 'provider exploded');
   });
 
   test('normalizes cache and reasoning usage variants in the adapter module', () => {
