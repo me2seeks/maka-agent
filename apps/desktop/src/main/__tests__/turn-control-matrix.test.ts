@@ -33,6 +33,7 @@ import {
 } from '../../renderer/session-status-presentation.js';
 import { deriveTurnFooterActions } from '../../renderer/turn-footer-actions.js';
 import { deriveBranchBanner } from '../../renderer/branch-banner.js';
+import { sessionEventErrorMessage } from '../../renderer/model-connection-errors.js';
 
 // All `errorClass` values the fixture (or any realistic runtime) can
 // emit. The S1 / S6 gates exercise the renderer's `describeTurnErrorClass`
@@ -116,6 +117,21 @@ describe('turn-control-history matrix', () => {
           erroredToolCount: 0,
         }).action,
         'retry',
+      );
+    });
+
+    it('shows a normalized unknown-provider diagnostic without reclassifying its prose', () => {
+      assert.equal(
+        sessionEventErrorMessage({
+          type: 'error',
+          id: 'error-1',
+          turnId: 'turn-1',
+          ts: 1,
+          recoverable: false,
+          reason: 'unknown',
+          message: 'Your plan has no remaining usage.',
+        }),
+        'Your plan has no remaining usage.',
       );
     });
   });

@@ -3,8 +3,8 @@ import { getDesktopConversationCopy } from './locales/conversation-copy.js';
 
 /**
  * Locale-aware allowlist for stable ErrorEvent.reason values emitted by the
- * runtime. Unknown reasons intentionally return undefined so callers can use
- * their existing safe fallback instead of displaying raw provider text.
+ * runtime. Unknown reasons intentionally return undefined; their separately
+ * normalized diagnostic remains presentation detail, not localization input.
  */
 export function describeSessionErrorReason(reason: string | undefined, locale: UiLocale = 'zh'): string | undefined {
   const copy = getDesktopConversationCopy(locale).turnError;

@@ -44,6 +44,10 @@ export function sessionEventErrorMessage(
   const reasonDescription = describeSessionErrorReason(event.reason, locale);
   if (reasonDescription) return reasonDescription;
   const fallback = getDesktopConversationCopy(locale).actions.conversationErrorFallback;
+  // Runtime Host uses `unknown` only after the Model boundary has redacted and
+  // bounded the provider diagnostic. Preserve that explanation instead of
+  // running it back through a prose classifier and inventing account state.
+  if (event.reason?.toLowerCase() === 'unknown') return event.message.trim() || fallback;
   return localizedShellErrorMessage(new Error(event.message), fallback, locale);
 }
 
