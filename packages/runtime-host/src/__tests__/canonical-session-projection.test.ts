@@ -20,6 +20,7 @@ import {
 } from '../server/canonical-session-projection.js';
 import { type HostMessageRootPort, HostMessageCoordinator } from '../server/message-coordinator.js';
 import { worstCaseGoalProjection } from '../server/goal-projection.js';
+import { HostedExecutionProjectionReader } from '../server/hosted-execution-projection.js';
 import { RootAdmissionOwner } from '../server/root-admission-owner.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 
@@ -167,6 +168,14 @@ test('projects the canonical Run failure diagnostic with its terminal fact', asy
       failureClass: 'unknown',
       failureMessage: 'Your plan has no remaining usage.',
     });
+    assert.deepEqual(
+      await new HostedExecutionProjectionReader(stores).read({
+        sessionId: session.id,
+        turnId: 'turn-1',
+        runId: 'run-1',
+      }),
+      projected?.rootTurn,
+    );
 
     await stores.agentRunStore.updateRun(session.id, 'run-1', {
       failureMessage: '🦊'.repeat(TURN_FAILURE_MESSAGE_MAX_LENGTH),
@@ -180,6 +189,14 @@ test('projects the canonical Run failure diagnostic with its terminal fact', asy
       bounded.rootTurn.failureMessage,
     );
     assert.ok(bounded.rootTurn.failureMessage?.endsWith('…'));
+    assert.deepEqual(
+      await new HostedExecutionProjectionReader(stores).read({
+        sessionId: session.id,
+        turnId: 'turn-1',
+        runId: 'run-1',
+      }),
+      bounded.rootTurn,
+    );
     await messages.close();
   });
 });

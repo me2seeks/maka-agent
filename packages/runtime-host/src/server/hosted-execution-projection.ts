@@ -9,6 +9,7 @@ import {
 } from '@maka/runtime';
 import type { ExecutionStoresWriter } from '@maka/storage/execution-stores';
 import type { HostedExecutionRef, HostedExecutionSnapshot } from './hosted-execution-authority.js';
+import { projectTurnFailureMessage } from './turn-failure-diagnostic.js';
 
 export class HostedExecutionProjectionReader {
   constructor(private readonly stores: ExecutionStoresWriter<'interactive'>) {}
@@ -44,11 +45,13 @@ export class HostedExecutionProjectionReader {
       }
       if (fact.runStatus === 'failed') {
         if (!fact.failureClass) throw new Error('Failed terminal fact has no failure class');
+        const failureMessage = projectTurnFailureMessage(run.failureMessage);
         return {
           ...execution,
           status: 'failed',
           terminalEventId: fact.terminalEvent.id,
           failureClass: fact.failureClass,
+          ...(failureMessage ? { failureMessage } : {}),
         };
       }
       if (!fact.abortSource) throw new Error('Cancelled terminal fact has no abort source');
