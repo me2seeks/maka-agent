@@ -540,8 +540,8 @@ describe('ModelAdapter stream and error normalization', () => {
     assert.equal(adapter.classifyError(billingError), 'ProviderBilling');
     assert.equal(adapter.makeErrorEvent('turn-1', billingError).reason, 'provider_billing');
     const usageLimitError = Object.assign(new Error('Your weekly usage limit has been reached'), {
-      statusCode: 403,
-      data: { error: { code: 'usage_limit_reached' } },
+      statusCode: 429,
+      data: { error: { type: 'usage_limit_reached' } },
     });
     const usageLimitEvent = adapter.makeErrorEvent('turn-1', usageLimitError);
     assert.equal(adapter.classifyError(usageLimitError), 'UsageLimit');

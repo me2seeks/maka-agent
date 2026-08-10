@@ -526,8 +526,8 @@ describe('Provider error classification', () => {
 
     // A typed product limit is not a short throttle even when it shares a
     // transport status with ordinary request throttling.
-    const planUsageLimit = providerError(403, 'Your subscription usage limit has been reached', {
-      code: 'usage_limit_reached',
+    const planUsageLimit = providerError(429, 'Your subscription usage limit has been reached', {
+      type: 'usage_limit_reached',
     });
     assert.equal(classifyError(planUsageLimit), 'UsageLimit');
     assert.deepEqual(providerRetryMetadata(planUsageLimit), { retryable: false });
