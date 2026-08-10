@@ -12,6 +12,7 @@ import type { StoredInteractionRequest } from '@maka/storage/interaction-store';
 import { acquireOperationalStateDatabase } from '@maka/storage';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import { type SessionMessageQueueProjection } from '../protocol/index.js';
+import { TURN_FAILURE_MESSAGE_MAX_LENGTH } from '../protocol/turn.js';
 import {
   type CanonicalSessionProjection,
   CanonicalSessionProjectionReader,
@@ -166,6 +167,19 @@ test('projects the canonical Run failure diagnostic with its terminal fact', asy
       failureClass: 'unknown',
       failureMessage: 'Your plan has no remaining usage.',
     });
+
+    await stores.agentRunStore.updateRun(session.id, 'run-1', {
+      failureMessage: '🦊'.repeat(TURN_FAILURE_MESSAGE_MAX_LENGTH),
+    });
+    const bounded = await reader.read(session.id);
+    assert.equal(bounded?.rootTurn?.status, 'failed');
+    if (bounded?.rootTurn?.status !== 'failed') throw new Error('Expected a failed root Turn');
+    assert.ok((bounded.rootTurn.failureMessage?.length ?? 0) <= TURN_FAILURE_MESSAGE_MAX_LENGTH);
+    assert.equal(
+      Buffer.from(bounded.rootTurn.failureMessage ?? '').toString(),
+      bounded.rootTurn.failureMessage,
+    );
+    assert.ok(bounded.rootTurn.failureMessage?.endsWith('…'));
     await messages.close();
   });
 });

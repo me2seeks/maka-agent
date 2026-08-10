@@ -64,7 +64,7 @@ export interface ProviderRetryMetadata {
   retryAfterMs?: number;
 }
 
-const PROVIDER_DIAGNOSTIC_MAX_CODE_POINTS = 2_000;
+const PROVIDER_DIAGNOSTIC_MAX_LENGTH = 2_000;
 
 const MAX_SAFE_TIMER_DELAY_MS = 2_147_483_647;
 const OPENAI_RESPONSES_WEBSOCKET_TRANSPORT_ERROR = 'OPENAI_RESPONSES_WEBSOCKET_TRANSPORT_ERROR';
@@ -184,9 +184,20 @@ function providerDiagnosticMessage(error: unknown): string | undefined {
     .map((fragment) => (fragment.trim() ? redactSecrets(fragment) : fragment))
     .join('');
   const sanitized = sanitizeUnicodeText(redacted, {
-    maxCodePoints: PROVIDER_DIAGNOSTIC_MAX_CODE_POINTS,
+    maxCodePoints: PROVIDER_DIAGNOSTIC_MAX_LENGTH,
   });
-  return sanitized || undefined;
+  return truncateUtf16Safely(sanitized, PROVIDER_DIAGNOSTIC_MAX_LENGTH) || undefined;
+}
+
+function truncateUtf16Safely(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  const contentLimit = maxLength - 1;
+  let content = '';
+  for (const codePoint of value) {
+    if (content.length + codePoint.length > contentLimit) break;
+    content += codePoint;
+  }
+  return `${content}…`;
 }
 
 function extractProviderMessage(value: unknown, depth = 0): string | undefined {

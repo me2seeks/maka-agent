@@ -675,7 +675,12 @@ describe('Provider error classification', () => {
     assert.equal(failure.kind, 'unknown');
     assert.ok(failure.message.startsWith('Account limit reached api_key=[redacted]'));
     assert.ok(!failure.message.includes('sk-provider-secret'));
-    assert.ok(Array.from(failure.message).length <= 2_001);
+    assert.ok(failure.message.length <= 2_000);
+
+    const wideDiagnostic = normalizeProviderFailure(new Error('🦊'.repeat(2_100))).message;
+    assert.ok(wideDiagnostic.length <= 2_000);
+    assert.equal(Buffer.from(wideDiagnostic).toString(), wideDiagnostic);
+    assert.ok(wideDiagnostic.endsWith('…'));
 
     const malformedBody = normalizeProviderFailure(
       Object.assign(new Error('Bad gateway'), {

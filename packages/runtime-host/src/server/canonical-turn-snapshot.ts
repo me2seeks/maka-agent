@@ -81,7 +81,13 @@ export async function readCanonicalTurnSnapshot(
 function projectFailureMessage(message: string | undefined): string | undefined {
   if (!message) return undefined;
   if (message.length <= TURN_FAILURE_MESSAGE_MAX_LENGTH) return message;
-  return `${message.slice(0, TURN_FAILURE_MESSAGE_MAX_LENGTH - 1)}…`;
+  const contentLimit = TURN_FAILURE_MESSAGE_MAX_LENGTH - 1;
+  let content = '';
+  for (const codePoint of message) {
+    if (content.length + codePoint.length > contentLimit) break;
+    content += codePoint;
+  }
+  return `${content}…`;
 }
 
 async function readRunIfPresent(
