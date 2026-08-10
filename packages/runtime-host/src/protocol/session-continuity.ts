@@ -24,7 +24,7 @@ import { decodeTurnSnapshot, type TurnSnapshot } from './turn.js';
 import { decodeGoalProjection, type GoalProjection } from './goal.js';
 import { decodeRuntimeResourceRef } from './runtime-resource.js';
 
-export const SESSION_CONTINUITY_SCHEMA_VERSION = 3 as const;
+export const SESSION_CONTINUITY_SCHEMA_VERSION = 4 as const;
 export const SESSION_CONTINUITY_SNAPSHOT_MAX_BYTES = 56 * 1024;
 export const SESSION_LIVE_DELTA_MAX_BYTES = 16 * 1024;
 // Core emits at most 8,192 UTF-16 code units per tool output event. A code unit

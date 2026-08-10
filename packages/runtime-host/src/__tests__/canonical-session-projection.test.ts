@@ -127,6 +127,49 @@ test('projects the canonical root lifecycle and the attachment queue from real S
   });
 });
 
+test('projects the canonical Run failure diagnostic with its terminal fact', async () => {
+  await withStores(async (root, stores) => {
+    const session = await stores.sessionStore.create(sessionInput(root));
+    const rootAdmissions = new RootAdmissionOwner(stores.agentRunStore);
+    await rootAdmissions.recoverSession(session.id);
+    const messages = createMessages(session.id, stores);
+    const reader = new CanonicalSessionProjectionReader({ stores, rootAdmissions, messages });
+
+    await rootAdmissions.admitRootTurn({
+      sessionId: session.id,
+      turnId: 'turn-1',
+      proposedRunId: 'run-1',
+      proposedUserMessageId: 'user-1',
+      execution: { kind: 'external_message' },
+      normalizedInput: { text: 'hello' },
+      sourceMessages: [],
+      admittedAt: 10,
+    });
+    await stores.agentRunStore.createRun(runHeader(session.id));
+    const terminal = failedTerminalEvent(session.id);
+    await stores.runtimeEventStore.appendRuntimeEvent(session.id, 'run-1', terminal);
+    await stores.agentRunStore.updateRun(session.id, 'run-1', {
+      status: 'failed',
+      updatedAt: 12,
+      completedAt: 12,
+      failureClass: 'unknown',
+      failureMessage: 'Your plan has no remaining usage.',
+    });
+
+    const projected = await reader.read(session.id);
+    assert.deepEqual(projected?.rootTurn, {
+      sessionId: session.id,
+      turnId: 'turn-1',
+      runId: 'run-1',
+      status: 'failed',
+      terminalEventId: terminal.id,
+      failureClass: 'unknown',
+      failureMessage: 'Your plan has no remaining usage.',
+    });
+    await messages.close();
+  });
+});
+
 test('projects pending Interactions and preflights their combined snapshot capacity', async () => {
   await withStores(async (root, stores) => {
     const session = await stores.sessionStore.create(sessionInput(root));
@@ -448,6 +491,28 @@ function terminalEvent(sessionId: string): RuntimeEvent {
     role: 'model',
     author: 'agent',
     content: { kind: 'text', text: 'done' },
+  };
+}
+
+function failedTerminalEvent(sessionId: string): RuntimeEvent {
+  return {
+    id: 'terminal-failed-1',
+    invocationId: 'run-1',
+    sessionId,
+    turnId: 'turn-1',
+    runId: 'run-1',
+    ts: 12,
+    partial: false,
+    status: 'failed',
+    role: 'model',
+    author: 'agent',
+    content: {
+      kind: 'error',
+      code: 'unknown',
+      reason: 'unknown',
+      message: 'Your plan has no remaining usage.',
+    },
+    actions: { endInvocation: true, stateDelta: { failureClass: 'unknown' } },
   };
 }
 

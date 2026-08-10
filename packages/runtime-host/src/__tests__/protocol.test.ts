@@ -33,6 +33,7 @@ import {
   TURN_MESSAGE_QUOTE_LABEL_MAX_LENGTH,
   TURN_MESSAGE_QUOTE_MAX_COUNT,
   TURN_MESSAGE_QUOTE_TEXT_MAX_LENGTH,
+  TURN_FAILURE_MESSAGE_MAX_LENGTH,
   TURN_SKILL_ID_MAX_COUNT,
   TURN_SKILL_ID_MAX_LENGTH,
 } from '../protocol/turn.js';
@@ -47,7 +48,7 @@ describe('Runtime Host bootstrap protocol', () => {
 
   test('keeps the experimental protocol at v0 with the declared authority operations', () => {
     assert.equal(RUNTIME_HOST_PROTOCOL_VERSION, 0);
-    assert.equal(RUNTIME_HOST_COMPATIBILITY_EPOCH, 13);
+    assert.equal(RUNTIME_HOST_COMPATIBILITY_EPOCH, 14);
     assert.deepEqual(Object.keys(HOST_OPERATION_SPECS).sort(), [
       'access.credential.issue',
       'access.credential.revoke',
@@ -178,7 +179,7 @@ describe('Runtime Host bootstrap protocol', () => {
   });
 
   test('keeps subscription operations closed, ready-only, and queue Epoch correlated', () => {
-    assert.equal(SESSION_CONTINUITY_SCHEMA_VERSION, 3);
+    assert.equal(SESSION_CONTINUITY_SCHEMA_VERSION, 4);
     assert.deepEqual(
       Object.fromEntries(
         (['subscription.open', 'subscription.close'] as const).map((operation) => [
@@ -1538,6 +1539,36 @@ describe('Runtime Host bootstrap protocol', () => {
             status: 'completed',
             terminalEventId: 'event-1',
             abortSource: 'user',
+          },
+        }),
+      isInvalidFrame,
+    );
+  });
+
+  test('decodes a bounded failed-Turn diagnostic and rejects oversized text', () => {
+    const frame = {
+      requestId: 'request-failed',
+      operation: 'turn.query' as const,
+      ok: true as const,
+      result: {
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        runId: 'run-1',
+        status: 'failed',
+        terminalEventId: 'event-1',
+        failureClass: 'unknown',
+        failureMessage: 'Your plan has no remaining usage.',
+      },
+    };
+
+    assert.doesNotThrow(() => decodeHostFrame(frame));
+    assert.throws(
+      () =>
+        decodeHostFrame({
+          ...frame,
+          result: {
+            ...frame.result,
+            failureMessage: 'x'.repeat(TURN_FAILURE_MESSAGE_MAX_LENGTH + 1),
           },
         }),
       isInvalidFrame,

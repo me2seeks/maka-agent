@@ -2,6 +2,7 @@ import type { AgentRunHeader } from '@maka/core/agent-run';
 import { classifyTerminalRuntimeLedger } from '@maka/runtime';
 import type { ExecutionStoresWriter } from '@maka/storage/execution-stores';
 import type { TurnSnapshot } from '../protocol/index.js';
+import { TURN_FAILURE_MESSAGE_MAX_LENGTH } from '../protocol/turn.js';
 
 type CanonicalTurnStores = Pick<
   ExecutionStoresWriter<'interactive'>,
@@ -44,6 +45,7 @@ export async function readCanonicalTurnSnapshot(
     }
     if (fact.runStatus === 'failed') {
       if (!fact.failureClass) throw new Error('Failed terminal fact has no failure class');
+      const failureMessage = projectFailureMessage(run.failureMessage);
       return {
         sessionId,
         turnId,
@@ -51,6 +53,7 @@ export async function readCanonicalTurnSnapshot(
         status: 'failed',
         terminalEventId: fact.terminalEvent.id,
         failureClass: fact.failureClass,
+        ...(failureMessage ? { failureMessage } : {}),
       };
     }
     if (!fact.abortSource) throw new Error('Cancelled terminal fact has no abort source');
@@ -73,6 +76,12 @@ export async function readCanonicalTurnSnapshot(
     throw new Error('Non-created Run has no durable start fact');
   }
   return { sessionId, turnId, runId, status: run.status };
+}
+
+function projectFailureMessage(message: string | undefined): string | undefined {
+  if (!message) return undefined;
+  if (message.length <= TURN_FAILURE_MESSAGE_MAX_LENGTH) return message;
+  return `${message.slice(0, TURN_FAILURE_MESSAGE_MAX_LENGTH - 1)}…`;
 }
 
 async function readRunIfPresent(

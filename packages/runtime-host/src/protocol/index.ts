@@ -64,7 +64,9 @@ export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // longer safe to use.
 // 13: composition identity, trusted capability providers, and Automation waiting
 // state changed the closed schema.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 13 as const;
+// 14: failed Turn snapshots may carry the bounded diagnostic owned by the
+// canonical Run header.
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 14 as const;
 // A legal sandbox-boundary expansion can consume 64 KiB before its Interaction
 // envelope and independently bounded justification are added. Keep transport
 // capacity large enough to represent that domain value; narrower surfaces such

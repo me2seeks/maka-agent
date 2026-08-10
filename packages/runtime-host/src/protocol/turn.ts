@@ -55,6 +55,7 @@ export const TURN_MESSAGE_QUOTE_TEXT_MAX_LENGTH = 32_000;
 export const TURN_MESSAGE_QUOTE_LABEL_MAX_LENGTH = 200;
 export const TURN_SKILL_ID_MAX_COUNT = 50;
 export const TURN_SKILL_ID_MAX_LENGTH = 512;
+export const TURN_FAILURE_MESSAGE_MAX_LENGTH = 2_048;
 const ATTACHMENT_NAME_MAX_BYTES = 512;
 const ATTACHMENT_MIME_TYPE_MAX_BYTES = 256;
 const ATTACHMENT_PATH_MAX_BYTES = 4096;
@@ -147,6 +148,7 @@ export type TurnSnapshot =
       status: 'failed';
       terminalEventId: string;
       failureClass: string;
+      failureMessage?: string;
     })
   | (TurnSnapshotBase & {
       status: 'cancelled';
@@ -604,19 +606,26 @@ export function decodeTurnSnapshot(value: unknown): TurnSnapshot {
     };
   }
   if (status === 'failed') {
-    assertExactKeys(record, 'failed Turn snapshot', [
-      'sessionId',
-      'turnId',
-      'runId',
-      'status',
-      'terminalEventId',
-      'failureClass',
-    ]);
+    requireShapedRecord(
+      record,
+      'failed Turn snapshot',
+      ['sessionId', 'turnId', 'runId', 'status', 'terminalEventId', 'failureClass'],
+      ['failureMessage'],
+    );
     return {
       ...base,
       status,
       terminalEventId: requireId(record.terminalEventId, 'terminalEventId'),
       failureClass: requireString(record.failureClass, 'failureClass', 128),
+      ...(record.failureMessage === undefined
+        ? {}
+        : {
+            failureMessage: requireString(
+              record.failureMessage,
+              'failureMessage',
+              TURN_FAILURE_MESSAGE_MAX_LENGTH,
+            ),
+          }),
     };
   }
   if (status === 'cancelled') {
