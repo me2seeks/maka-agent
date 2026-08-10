@@ -154,8 +154,9 @@ export function providerRetryMetadata(error: unknown): ProviderRetryMetadata {
 
 /**
  * Closes the provider-error boundary in one place. Stable structured facts
- * choose Runtime policy; provider wording is only a redacted, bounded
- * diagnostic for the user and never feeds the failure kind or retry decision.
+ * choose account-state policy; provider wording is only a redacted, bounded
+ * diagnostic for that taxonomy. Existing context-overflow and transport
+ * recovery detection remains separate below.
  */
 export function normalizeProviderFailure(error: unknown): ModelFailure {
   const errorClass = classifyError(error);
