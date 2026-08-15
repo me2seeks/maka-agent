@@ -228,8 +228,7 @@ function scanSummaryStructure(text: string): {
   }
   return {
     orderedSectionsPresent:
-      matchedSections === REQUIRED_SUMMARY_SECTIONS.length &&
-      sectionHasContent.every(Boolean),
+      matchedSections === REQUIRED_SUMMARY_SECTIONS.length && sectionHasContent.every(Boolean),
     endsInsideOpenFence: fenceFamily !== undefined,
   };
 }
