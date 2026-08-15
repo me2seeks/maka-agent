@@ -616,7 +616,23 @@ describe('buildLlmHistorySummarizer', () => {
       summarize(
         inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
       ),
-      /malformed_summary/,
+      /malformed_summary_missing_section/,
+    );
+  });
+
+  test('a deeper heading level cannot stand in for a mandated section', async () => {
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({
+        text: VALID_SUMMARY.replaceAll('## ', '### '),
+      }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary_missing_section/,
     );
   });
 
@@ -630,7 +646,7 @@ describe('buildLlmHistorySummarizer', () => {
       summarize(
         inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
       ),
-      /malformed_summary/,
+      /malformed_summary_truncated/,
     );
   });
 
@@ -644,8 +660,21 @@ describe('buildLlmHistorySummarizer', () => {
       summarize(
         inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
       ),
-      /malformed_summary/,
+      /malformed_summary_truncated/,
     );
+  });
+
+  test('a verbatim inline fence marker in a preserved error message is not truncation', async () => {
+    const withInlineFence = `${VALID_SUMMARY}\n\n## Critical Context\n- markdown lint: unexpected \`\`\` at line 12`;
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({ text: withInlineFence }),
+    });
+
+    const result = await summarize(
+      inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+    );
+    expect(result).toBe(withInlineFence);
   });
 
   test('rejects a paragraph-sized summary for a large folded span', async () => {
@@ -665,7 +694,40 @@ describe('buildLlmHistorySummarizer', () => {
           }),
         ]),
       ),
-      /malformed_summary/,
+      /malformed_summary_too_small_for_fold/,
+    );
+  });
+
+  test('the size floor covers the full replaced span, not just the newly folded increment', async () => {
+    // Steady-state roll-forward: the checkpoint replaces everything it covers,
+    // so a small increment must not let a fragment replace a large span.
+    const old = ev({
+      role: 'user',
+      author: 'user',
+      content: { kind: 'text', text: `big ${'x'.repeat(60_000)}` },
+    });
+    const newer = ev({
+      role: 'model',
+      author: 'agent',
+      content: { kind: 'text', text: 'one small turn' },
+    });
+    const previousCheckpoint = buildHistoryCompactCheckpoint({
+      sessionId: 'sess-1',
+      coveredRuntimeEvents: [old],
+      summary: 'PRIOR_SUMMARY',
+    });
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({ text: VALID_SUMMARY }),
+    });
+
+    await assert.rejects(
+      summarize({
+        ...inputWith([old, newer]),
+        previousCheckpoint,
+        newlyFoldedRuntimeEvents: [newer],
+      }),
+      /malformed_summary_too_small_for_fold/,
     );
   });
 

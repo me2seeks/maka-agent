@@ -1,6 +1,7 @@
+import type { RuntimeEvent } from '@maka/core/runtime-event';
 import { rawFinishReasonString, type ModelMessage, type ToolCallPart } from './model-protocol.js';
 import { buildRuntimeEventModelReplayPlan } from './model-history.js';
-import { estimateModelMessagesChars } from './context-budget.js';
+import { estimateRuntimeEventsTokens } from './context-budget-helpers.js';
 import { toolResultOutput } from './tool-result-output.js';
 import type { HistoryCompactSummaryInput } from './ai-sdk-compaction-contract.js';
 import { HistoryCompactSummarizerError } from './history-compact-error.js';
@@ -35,6 +36,12 @@ export interface BuildLlmHistorySummarizerOptions {
   generateText?: AiSdkGenerateTextLike;
 }
 
+// The sections a completion must carry to be allowed to REPLACE folded
+// history (#3029). The prompt below is built from the same constants so the
+// mandated format and the validation can never drift apart.
+const REQUIRED_SUMMARY_SECTIONS = ['## Goal', '## Progress', '## Next Steps'] as const;
+const [GOAL_SECTION, PROGRESS_SECTION, NEXT_STEPS_SECTION] = REQUIRED_SUMMARY_SECTIONS;
+
 // Conversation-summarization prompt (sectioned, modelled on pi/opencode):
 // asks for a checkpoint another LLM can continue from. Tool calls and their
 // results are part of the conversation sent to the summarizer, because the
@@ -46,10 +53,10 @@ const SUMMARIZATION_SYSTEM_PROMPT = [
   '',
   'Use this exact format:',
   '',
-  '## Goal',
+  GOAL_SECTION,
   '[What the user is trying to accomplish]',
   '',
-  '## Progress',
+  PROGRESS_SECTION,
   '### Done',
   '- [Completed work and changes]',
   '### In Progress',
@@ -58,7 +65,7 @@ const SUMMARIZATION_SYSTEM_PROMPT = [
   '## Key Decisions',
   '- **[Decision]**: [Brief rationale]',
   '',
-  '## Next Steps',
+  NEXT_STEPS_SECTION,
   '1. [Ordered list of what should happen next]',
   '',
   '## Critical Context',
@@ -123,7 +130,7 @@ export function buildLlmHistorySummarizer(options: BuildLlmHistorySummarizerOpti
       if (rawFinishReasonString(result.finishReason) === 'length') {
         throw new HistoryCompactSummarizerError('output_length');
       }
-      assertWellFormedCheckpointSummary(result.text, estimateModelMessagesChars(messages));
+      assertWellFormedCheckpointSummary(result.text, input.source.foldedRuntimeEvents);
       return result.text;
     } catch (error) {
       if (error instanceof HistoryCompactSummarizerError) throw error;
@@ -132,33 +139,57 @@ export function buildLlmHistorySummarizer(options: BuildLlmHistorySummarizerOpti
   };
 }
 
-// The mandated checkpoint skeleton a summary must carry to be allowed to
-// REPLACE folded history. #3029: a degraded provider completion — a 138-token
-// free-form fragment ending mid-sentence — was accepted as the checkpoint for
-// ~235k estimated tokens of history, and the continuation confabulated around
-// the missing context. Anything that does not look like the checkpoint the
-// prompt mandates fails open instead (history kept, compaction retried).
-const REQUIRED_SUMMARY_SECTIONS = ['## Goal', '## Progress', '## Next Steps'] as const;
 // Floors for the incident's shape: folding a large span into a paragraph
-// cannot be a faithful checkpoint. ~10k estimated tokens of fold (at the
-// 4-chars/token estimate) requires at least ~200 estimated tokens of summary.
-const LARGE_FOLD_CHARS = 40_000;
+// cannot be a faithful checkpoint. Folds above ~10k estimated tokens (at the
+// default 4-chars/token estimate) require at least ~200 estimated tokens of
+// summary.
+const LARGE_FOLD_ESTIMATED_TOKENS = 10_000;
 const LARGE_FOLD_SUMMARY_CHARS_FLOOR = 800;
 
-function assertWellFormedCheckpointSummary(summary: string, foldedChars: number): void {
+// #3029: a degraded provider completion — a 138-token free-form fragment
+// ending mid-sentence, delivered with a stop finish reason — was accepted as
+// the checkpoint for ~235k estimated tokens of history, and the continuation
+// confabulated around the missing context. Anything that does not look like
+// the checkpoint the prompt mandates fails open instead (history kept,
+// compaction retried). The size floor is measured against the FULL covered
+// span the checkpoint replaces, not the newly folded increment, so rolling
+// roll-forward compaction cannot slip a fragment past it.
+function assertWellFormedCheckpointSummary(
+  summary: string,
+  coveredRuntimeEvents: readonly RuntimeEvent[],
+): void {
   const trimmed = summary.trim();
   // The compaction layer's empty_summary gate owns the empty case.
   if (trimmed.length === 0) return;
-  const missingSection = REQUIRED_SUMMARY_SECTIONS.some((section) => !trimmed.includes(section));
-  // A trailing colon or an unclosed code fence marks output cut mid-sentence —
-  // seen with partial completions the provider still finished with 'stop'.
-  const endsMidSentence = /[:：]$/.test(trimmed);
-  const unclosedCodeFence = (trimmed.match(/```/g) ?? []).length % 2 === 1;
-  const tooSmallForFold =
-    foldedChars > LARGE_FOLD_CHARS && trimmed.length < LARGE_FOLD_SUMMARY_CHARS_FLOOR;
-  if (missingSection || endsMidSentence || unclosedCodeFence || tooSmallForFold) {
-    throw new HistoryCompactSummarizerError('malformed_summary');
+  // Line-anchored so a '### Goal' heading or an inline mention cannot stand
+  // in for the mandated section.
+  for (const section of REQUIRED_SUMMARY_SECTIONS) {
+    if (!new RegExp(`^${section}\\b`, 'm').test(trimmed)) {
+      throw new HistoryCompactSummarizerError('malformed_summary_missing_section');
+    }
   }
+  // A trailing colon or ending inside an open code fence marks output cut
+  // mid-sentence — seen with partial completions the provider still finished
+  // with 'stop'.
+  if (/[:：]$/.test(trimmed) || endsInsideOpenCodeFence(trimmed)) {
+    throw new HistoryCompactSummarizerError('malformed_summary_truncated');
+  }
+  if (
+    trimmed.length < LARGE_FOLD_SUMMARY_CHARS_FLOOR &&
+    estimateRuntimeEventsTokens(coveredRuntimeEvents) > LARGE_FOLD_ESTIMATED_TOKENS
+  ) {
+    throw new HistoryCompactSummarizerError('malformed_summary_too_small_for_fold');
+  }
+}
+
+// Only fences that open a line toggle, so a verbatim ``` inside a preserved
+// error message cannot read as truncation.
+function endsInsideOpenCodeFence(text: string): boolean {
+  let open = false;
+  for (const line of text.split('\n')) {
+    if (/^\s*```/.test(line)) open = !open;
+  }
+  return open;
 }
 
 interface AiSdkTextModule {
