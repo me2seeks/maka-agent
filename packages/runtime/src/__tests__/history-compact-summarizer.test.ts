@@ -36,6 +36,19 @@ function ev(overrides: Partial<RuntimeEvent> & { content?: RuntimeEventContent }
   } as RuntimeEvent;
 }
 
+// Minimal summary that passes #3029's checkpoint validation (required
+// sections, no truncation markers).
+const VALID_SUMMARY = [
+  '## Goal',
+  'X',
+  '',
+  '## Progress',
+  '- done',
+  '',
+  '## Next Steps',
+  '1. continue',
+].join('\n');
+
 function inputWith(events: RuntimeEvent[], abortSignal?: AbortSignal): HistoryCompactSummaryInput {
   return {
     sessionId: 'sess-1',
@@ -54,7 +67,7 @@ describe('buildLlmHistorySummarizer', () => {
       providerOptions,
       generateText: async (options) => {
         seen = options;
-        return { text: '## Goal\nX' };
+        return { text: VALID_SUMMARY };
       },
     });
 
@@ -77,7 +90,7 @@ describe('buildLlmHistorySummarizer', () => {
       resolveModel: () =>
         new MockLanguageModelV4({
           doGenerate: {
-            content: [{ type: 'text', text: '## Goal\nX' }],
+            content: [{ type: 'text', text: VALID_SUMMARY }],
             finishReason: { unified: 'stop', raw: 'stop' },
             usage: {
               inputTokens: { total: 7, noCache: 7, cacheRead: 0, cacheWrite: 0 },
@@ -134,7 +147,7 @@ describe('buildLlmHistorySummarizer', () => {
     const seen: Array<{ messages: unknown[] }> = [];
     const generateText: AiSdkGenerateTextLike = async (opts) => {
       seen.push(opts);
-      return { text: '## Goal\nX' };
+      return { text: VALID_SUMMARY };
     };
     const summarize = buildLlmHistorySummarizer({ resolveModel: () => 'fake-model', generateText });
 
@@ -154,7 +167,7 @@ describe('buildLlmHistorySummarizer', () => {
     ];
 
     const result = await summarize(inputWith(events));
-    expect(result).toBe('## Goal\nX');
+    expect(result).toBe(VALID_SUMMARY);
 
     const messages = seen[0]!.messages as Array<{
       role: string;
@@ -588,6 +601,102 @@ describe('buildLlmHistorySummarizer', () => {
     );
   });
 
+  test('rejects the incident fragment: a free-form summary without the mandated sections', async () => {
+    // The #3029 incident: 742 folded events accepted a 138-token free-form
+    // fragment as their checkpoint. Section-less prose must fail open.
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({
+        text: '确认服务端语义后，决定：先只在文本路径上加入预算判断。现在看 desktop 的 retry 循环结尾：',
+        finishReason: 'stop',
+      }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary/,
+    );
+  });
+
+  test('rejects a structured summary that ends mid-sentence on a trailing colon', async () => {
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({ text: `${VALID_SUMMARY}\n\n## Critical Context\n- 然后：` }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary/,
+    );
+  });
+
+  test('rejects a structured summary with an unclosed code fence', async () => {
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({ text: `${VALID_SUMMARY}\n\n\`\`\`ts\nconst x =` }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary/,
+    );
+  });
+
+  test('rejects a paragraph-sized summary for a large folded span', async () => {
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      // Structurally complete, but far below the floor for a large fold.
+      generateText: async () => ({ text: VALID_SUMMARY }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([
+          ev({
+            role: 'user',
+            author: 'user',
+            content: { kind: 'text', text: `big ${'x'.repeat(60_000)}` },
+          }),
+        ]),
+      ),
+      /malformed_summary/,
+    );
+  });
+
+  test('accepts a proportionate structured summary for a large folded span', async () => {
+    const longSummary = [
+      '## Goal',
+      'X',
+      '',
+      '## Progress',
+      `- ${'done '.repeat(200)}`,
+      '',
+      '## Next Steps',
+      '1. continue',
+    ].join('\n');
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({ text: longSummary }),
+    });
+
+    const result = await summarize(
+      inputWith([
+        ev({
+          role: 'user',
+          author: 'user',
+          content: { kind: 'text', text: `big ${'x'.repeat(60_000)}` },
+        }),
+      ]),
+    );
+    expect(result).toBe(longSummary);
+  });
+
   test('returns undefined without calling generateText when there are no events to summarize', async () => {
     let called = false;
     const generateText: AiSdkGenerateTextLike = async () => {
@@ -608,7 +717,7 @@ describe('buildLlmHistorySummarizer', () => {
       resolveModel: () => 'fake-model',
       generateText: async (options) => {
         seen.push(options.messages);
-        return { text: 'rolled' };
+        return { text: VALID_SUMMARY };
       },
     });
     const old = ev({
@@ -635,7 +744,7 @@ describe('buildLlmHistorySummarizer', () => {
       inputBudget: { maxEstimatedTokens: 10_000, charsPerToken: 1 },
     });
 
-    expect(result).toBe('rolled');
+    expect(result).toBe(VALID_SUMMARY);
     const serialized = JSON.stringify(seen[0]);
     expect(serialized).toContain('PRIOR_SUMMARY');
     expect(serialized).toContain('NEWLY_EVICTED_RAW');

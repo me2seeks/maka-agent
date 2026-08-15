@@ -315,7 +315,14 @@ function buildFixture(options: MidTurnFixtureOptions = {}): MidTurnFixture {
   const commits: ModelCallCommit<ModelCallAttempt>[] = [];
   const summarizerModel = new MockLanguageModelV4({
     doGenerate: {
-      content: [{ type: 'text', text: 'MID_TURN_SUMMARY_SENTINEL' }],
+      content: [
+        {
+          type: 'text',
+          // Structured so it passes the summarizer's checkpoint validation
+          // (#3029) while keeping the sentinel greppable in prompts.
+          text: '## Goal\nMID_TURN_SUMMARY_SENTINEL\n\n## Progress\n- done\n\n## Next Steps\n1. continue',
+        },
+      ],
       finishReason: { unified: 'stop', raw: 'stop' },
       usage: {
         inputTokens: { total: 31, noCache: 31, cacheRead: 0, cacheWrite: 0 },
