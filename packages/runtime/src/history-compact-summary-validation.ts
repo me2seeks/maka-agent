@@ -50,10 +50,6 @@ const TEMPLATE_PLACEHOLDER_LINES: ReadonlySet<string> = new Set(
   SUMMARY_FORMAT_TEMPLATE.map((line) => line.trim()).filter((line) => line.length > 0),
 );
 
-const SECTION_HEAD_PATTERNS = REQUIRED_SUMMARY_SECTIONS.map(
-  (section) => new RegExp(`^${section}\\b`),
-);
-
 // Floors for the incident's shape: folding a large span into a paragraph
 // cannot be a faithful checkpoint. Folds above ~10k estimated tokens require
 // at least ~200 estimated tokens of summary, both measured at the session's
@@ -61,6 +57,12 @@ const SECTION_HEAD_PATTERNS = REQUIRED_SUMMARY_SECTIONS.map(
 const LARGE_FOLD_ESTIMATED_TOKENS = 10_000;
 const LARGE_FOLD_SUMMARY_TOKENS_FLOOR = 200;
 const DEFAULT_CHARS_PER_TOKEN = 4;
+
+// Best-effort signals that a provider stopped mid-thought. Fence state is
+// derived by the structural scanner below, so write admission and legacy-load
+// quarantine cannot disagree about Markdown fence semantics. A trailing
+// backtick is deliberately absent: it can be the end of a complete fence.
+const TRUNCATED_TAIL_PATTERN = /(?:\.{3}|[:：,，、;；…(（—])\s*$/u;
 
 export interface CheckpointSummaryFoldContext {
   /** The FULL covered span the checkpoint replaces — not the newly folded
@@ -88,12 +90,8 @@ export function findCheckpointSummaryDefect(
   if (!scan.orderedSectionsPresent) {
     return 'malformed_summary_missing_section';
   }
-  // A trailing colon or ending inside an open code fence marks output cut
-  // mid-sentence — seen with partial completions the provider still finished
-  // with 'stop'.
-  if (/[:：]$/.test(trimmed) || scan.endsInsideOpenFence) {
-    return 'malformed_summary_truncated';
-  }
+  const truncationDefect = findTruncationDefect(trimmed, scan);
+  if (truncationDefect !== undefined) return truncationDefect;
   if (foldContext !== undefined) {
     // Clamped so a zero/negative estimate cannot zero out the floor.
     const charsPerToken = Math.max(1, foldContext.charsPerToken ?? DEFAULT_CHARS_PER_TOKEN);
@@ -108,6 +106,26 @@ export function findCheckpointSummaryDefect(
   return undefined;
 }
 
+// Legacy checkpoints predate the section contract, so load recovery may only
+// quarantine writer-agnostic truncation. It still uses the exact same scan and
+// tail predicate as strict write admission above.
+export function findCheckpointSummaryTruncationDefect(
+  summary: string,
+): Extract<CheckpointSummaryDefect, 'malformed_summary_truncated'> | undefined {
+  const trimmed = summary.trim();
+  if (trimmed.length === 0) return undefined;
+  return findTruncationDefect(trimmed, scanSummaryStructure(trimmed));
+}
+
+function findTruncationDefect(
+  text: string,
+  scan: SummaryStructureScan,
+): Extract<CheckpointSummaryDefect, 'malformed_summary_truncated'> | undefined {
+  return scan.endsInsideOpenFence || TRUNCATED_TAIL_PATTERN.test(text)
+    ? 'malformed_summary_truncated'
+    : undefined;
+}
+
 // One line scan holding a single interpretation of the document for both
 // checks: the mandated sections must appear in order, each with non-empty
 // content, and only OUTSIDE fenced code blocks — a degraded model quoting the
@@ -116,10 +134,12 @@ export function findCheckpointSummaryDefect(
 // the opener (a shorter run stays fenced content), tracked line-opening only
 // so a verbatim ``` inside a preserved error message stays content. The scan
 // also reports whether the document ends inside an open fence.
-function scanSummaryStructure(text: string): {
+interface SummaryStructureScan {
   orderedSectionsPresent: boolean;
   endsInsideOpenFence: boolean;
-} {
+}
+
+function scanSummaryStructure(text: string): SummaryStructureScan {
   let openFence: { family: string; width: number } | undefined;
   let matchedSections = 0;
   // Content attribution target: content lines satisfy the most recently
@@ -169,7 +189,7 @@ function scanSummaryStructure(text: string): {
     }
     if (
       matchedSections < REQUIRED_SUMMARY_SECTIONS.length &&
-      SECTION_HEAD_PATTERNS[matchedSections]!.test(line)
+      line.trimEnd() === REQUIRED_SUMMARY_SECTIONS[matchedSections]
     ) {
       matchedSections += 1;
       attributesToRequiredSection = true;

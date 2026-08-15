@@ -887,10 +887,42 @@ describe('buildLlmHistorySummarizer', () => {
     );
   });
 
+  test('requires each mandated section heading to match the whole line', async () => {
+    for (const suffix of [' continued', ':', ' - details']) {
+      const summarize = buildLlmHistorySummarizer({
+        resolveModel: () => 'fake-model',
+        generateText: async () => ({
+          text: VALID_SUMMARY.replace('## Goal\n', `## Goal${suffix}\n`),
+        }),
+      });
+
+      await assert.rejects(
+        summarize(
+          inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+        ),
+        /malformed_summary_missing_section/,
+      );
+    }
+  });
+
   test('rejects a structured summary that ends mid-sentence on a trailing colon', async () => {
     const summarize = buildLlmHistorySummarizer({
       resolveModel: () => 'fake-model',
       generateText: async () => ({ text: `${VALID_SUMMARY}\n- 然后：` }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary_truncated/,
+    );
+  });
+
+  test('rejects a structured summary ending in an ASCII ellipsis', async () => {
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({ text: `${VALID_SUMMARY}\n- continuing...` }),
     });
 
     await assert.rejects(

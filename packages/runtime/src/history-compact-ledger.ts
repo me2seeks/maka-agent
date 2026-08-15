@@ -1,13 +1,28 @@
 import type { AgentRunEvent, AgentRunStore } from '@maka/core/agent-run';
 import {
   canReplaceHistoryCompactCheckpoint,
+  isTextHistoryCompactCheckpoint,
   validateHistoryCompactCheckpointShape,
   type HistoryCompactCheckpoint,
 } from './history-compact-checkpoint.js';
+import { findCheckpointSummaryTruncationDefect } from './history-compact-summary-validation.js';
 
 interface LedgerCheckpointCandidate {
   checkpoint: HistoryCompactCheckpoint;
   event: AgentRunEvent;
+}
+
+/**
+ * Legacy checkpoints predate the sectioned summarizer contract, so their
+ * summaries may omit `## Goal` etc. and remain usable. A truncated fragment,
+ * however, poisons every subsequent replay with a half-finished thought
+ * regardless of which writer produced it (#3029, #3041). The load path asks
+ * the shared summary scanner only for its truncation result, leaving
+ * section-less legacy summaries intact.
+ */
+function hasLoadableHistoryCompactSummary(checkpoint: HistoryCompactCheckpoint): boolean {
+  if (!isTextHistoryCompactCheckpoint(checkpoint)) return true;
+  return findCheckpointSummaryTruncationDefect(checkpoint.summary) === undefined;
 }
 
 export async function loadHistoryCompactCheckpointsFromRunLedger(
@@ -19,7 +34,10 @@ export async function loadHistoryCompactCheckpointsFromRunLedger(
     for (const event of await runStore.readEvents(sessionId, run.runId)) {
       if (event.type !== 'history_compact_checkpoint_recorded') continue;
       const checkpoint = event.data?.checkpoint;
-      if (validateHistoryCompactCheckpointShape(checkpoint, sessionId)) {
+      if (
+        validateHistoryCompactCheckpointShape(checkpoint, sessionId) &&
+        hasLoadableHistoryCompactSummary(checkpoint)
+      ) {
         checkpoints.set(checkpoint.checkpointId, checkpoint);
       }
     }
@@ -43,7 +61,12 @@ export async function loadLatestHistoryCompactCheckpointFromRunLedger(
       );
       if (projected === null) return undefined;
       const checkpoint = projected?.data?.checkpoint;
-      if (validateHistoryCompactCheckpointShape(checkpoint, sessionId)) return checkpoint;
+      if (
+        validateHistoryCompactCheckpointShape(checkpoint, sessionId) &&
+        hasLoadableHistoryCompactSummary(checkpoint)
+      ) {
+        return checkpoint;
+      }
       replaceEventId = projected?.id;
     } catch {
       // Recover the derived projection from the canonical ledger below.
@@ -58,7 +81,10 @@ export async function loadLatestHistoryCompactCheckpointFromRunLedger(
       const event = events[eventIndex]!;
       if (event.type !== 'history_compact_checkpoint_recorded') continue;
       const checkpoint = event.data?.checkpoint;
-      if (validateHistoryCompactCheckpointShape(checkpoint, sessionId)) {
+      if (
+        validateHistoryCompactCheckpointShape(checkpoint, sessionId) &&
+        hasLoadableHistoryCompactSummary(checkpoint)
+      ) {
         candidates.push({ checkpoint, event });
       }
     }
