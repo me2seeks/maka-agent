@@ -90,6 +90,18 @@ const MODEL_ID = 'hosted-real-model';
 const API_KEY = 'hosted-provider-key';
 const RESPONSE_TEXT = 'Hosted real-model execution completed.';
 const SUMMARY_TEXT = '## Goal\nContinue hosted real-model execution.';
+// History compaction validates checkpoint structure (#3029), so its requests
+// get a compaction-shaped completion instead of the shared one-section text.
+const COMPACT_SUMMARY_TEXT = [
+  '## Goal',
+  'Continue hosted real-model execution.',
+  '',
+  '## Progress',
+  '- hosted compaction exercised',
+  '',
+  '## Next Steps',
+  '1. continue',
+].join('\n');
 const CLIENT_CAPABILITY_RESULT_TEXT = 'HOSTED_CLIENT_CAPABILITY_RESULT_SENTINEL';
 const CHILD_AGENT_RESULT_TEXT = 'HOSTED_CHILD_AGENT_RESULT_SENTINEL';
 const MAX_IMPLEMENTATION_CHILD_PTY_READS = 5;
@@ -3343,9 +3355,11 @@ async function handleProviderRequest(
     return;
   }
   if (body.stream !== true) {
+    const serialized = JSON.stringify(body);
     const isMemoryExtraction = /Perform the first stage of long-term-memory extraction/.test(
-      JSON.stringify(body),
+      serialized,
     );
+    const isHistoryCompaction = /context summarization assistant/.test(serialized);
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(
       JSON.stringify({
@@ -3366,7 +3380,9 @@ async function handleProviderRequest(
                     requestedItems: [],
                     incidentalItems: [],
                   })
-                : SUMMARY_TEXT,
+                : isHistoryCompaction
+                  ? COMPACT_SUMMARY_TEXT
+                  : SUMMARY_TEXT,
             },
             finish_reason: 'stop',
           },

@@ -636,6 +636,62 @@ describe('buildLlmHistorySummarizer', () => {
     );
   });
 
+  test('headings quoted inside a fenced code block are not summary structure', async () => {
+    // A weak model can echo the requested template as a fenced example
+    // instead of producing the checkpoint; that must not replace history.
+    const fencedTemplate = [
+      '```markdown',
+      '## Goal',
+      'template goal',
+      '## Progress',
+      'template progress',
+      '## Next Steps',
+      'template next',
+      '```',
+    ].join('\n');
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({ text: fencedTemplate }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary_missing_section/,
+    );
+  });
+
+  test('rejects a heading-only skeleton with no section content', async () => {
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({ text: '## Goal\n## Progress\n## Next Steps' }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary_missing_section/,
+    );
+  });
+
+  test('rejects the mandated sections when they appear out of order', async () => {
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({
+        text: '## Progress\n- done\n\n## Goal\nX\n\n## Next Steps\n1. continue',
+      }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary_missing_section/,
+    );
+  });
+
   test('rejects a structured summary that ends mid-sentence on a trailing colon', async () => {
     const summarize = buildLlmHistorySummarizer({
       resolveModel: () => 'fake-model',

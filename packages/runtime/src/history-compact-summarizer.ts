@@ -161,17 +161,14 @@ function assertWellFormedCheckpointSummary(
   const trimmed = summary.trim();
   // The compaction layer's empty_summary gate owns the empty case.
   if (trimmed.length === 0) return;
-  // Line-anchored so a '### Goal' heading or an inline mention cannot stand
-  // in for the mandated section.
-  for (const section of REQUIRED_SUMMARY_SECTIONS) {
-    if (!new RegExp(`^${section}\\b`, 'm').test(trimmed)) {
-      throw new HistoryCompactSummarizerError('malformed_summary_missing_section');
-    }
+  const scan = scanSummaryStructure(trimmed);
+  if (!scan.orderedSectionsPresent) {
+    throw new HistoryCompactSummarizerError('malformed_summary_missing_section');
   }
   // A trailing colon or ending inside an open code fence marks output cut
   // mid-sentence — seen with partial completions the provider still finished
   // with 'stop'.
-  if (/[:：]$/.test(trimmed) || endsInsideOpenCodeFence(trimmed)) {
+  if (/[:：]$/.test(trimmed) || scan.endsInsideOpenFence) {
     throw new HistoryCompactSummarizerError('malformed_summary_truncated');
   }
   if (
@@ -182,14 +179,53 @@ function assertWellFormedCheckpointSummary(
   }
 }
 
-// Only fences that open a line toggle, so a verbatim ``` inside a preserved
-// error message cannot read as truncation.
-function endsInsideOpenCodeFence(text: string): boolean {
-  let open = false;
+// One line scan holding a single interpretation of the document for both
+// checks: the mandated sections must appear in order, each with non-empty
+// content, and only OUTSIDE fenced code blocks — a degraded model quoting the
+// template inside a fence must not count as structure. Fences (backtick or
+// tilde, line-opening only, so a verbatim ``` inside a preserved error
+// message stays content) also report whether the document ends inside one.
+function scanSummaryStructure(text: string): {
+  orderedSectionsPresent: boolean;
+  endsInsideOpenFence: boolean;
+} {
+  let fenceFamily: string | undefined;
+  let matchedSections = 0;
+  const sectionHasContent: boolean[] = REQUIRED_SUMMARY_SECTIONS.map(() => false);
   for (const line of text.split('\n')) {
-    if (/^\s*```/.test(line)) open = !open;
+    const fence = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      const family = fence[1]![0]!;
+      if (fenceFamily === undefined) fenceFamily = family;
+      else if (fenceFamily === family) fenceFamily = undefined;
+      continue;
+    }
+    if (fenceFamily !== undefined) {
+      // Fenced lines are content of the enclosing section, never headings.
+      if (matchedSections > 0 && line.trim().length > 0) {
+        sectionHasContent[matchedSections - 1] = true;
+      }
+      continue;
+    }
+    if (
+      matchedSections < REQUIRED_SUMMARY_SECTIONS.length &&
+      new RegExp(`^${REQUIRED_SUMMARY_SECTIONS[matchedSections]}\\b`).test(line)
+    ) {
+      matchedSections += 1;
+      continue;
+    }
+    // Anything non-blank that is not itself a heading counts as content for
+    // the most recently matched section (subheadings organize, lists carry).
+    if (matchedSections > 0 && line.trim().length > 0 && !/^#{1,6}\s/.test(line)) {
+      sectionHasContent[matchedSections - 1] = true;
+    }
   }
-  return open;
+  return {
+    orderedSectionsPresent:
+      matchedSections === REQUIRED_SUMMARY_SECTIONS.length &&
+      sectionHasContent.every(Boolean),
+    endsInsideOpenFence: fenceFamily !== undefined,
+  };
 }
 
 interface AiSdkTextModule {
