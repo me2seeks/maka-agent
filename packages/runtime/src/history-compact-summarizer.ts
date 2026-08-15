@@ -214,9 +214,15 @@ function scanSummaryStructure(text: string): {
       matchedSections += 1;
       continue;
     }
-    // Anything non-blank that is not itself a heading counts as content for
-    // the most recently matched section (subheadings organize, lists carry).
-    if (matchedSections > 0 && line.trim().length > 0 && !/^#{1,6}\s/.test(line)) {
+    // Anything non-blank that is not itself a heading or a thematic break
+    // counts as content for the most recently matched section (subheadings
+    // organize, lists carry, horizontal rules separate).
+    if (
+      matchedSections > 0 &&
+      line.trim().length > 0 &&
+      !/^#{1,6}\s/.test(line) &&
+      !/^\s*([-*_])\s*(?:\1\s*){2,}$/.test(line)
+    ) {
       sectionHasContent[matchedSections - 1] = true;
     }
   }

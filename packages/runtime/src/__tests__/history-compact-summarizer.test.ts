@@ -676,6 +676,20 @@ describe('buildLlmHistorySummarizer', () => {
     );
   });
 
+  test('horizontal rules between headings are separators, not section content', async () => {
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({ text: '## Goal\n---\n## Progress\n***\n## Next Steps\n- - -' }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary_missing_section/,
+    );
+  });
+
   test('rejects the mandated sections when they appear out of order', async () => {
     const summarize = buildLlmHistorySummarizer({
       resolveModel: () => 'fake-model',
