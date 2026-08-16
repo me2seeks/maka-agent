@@ -185,7 +185,7 @@ describe('buildLlmHistorySummarizer', () => {
     const seen: Array<{ messages: unknown[] }> = [];
     const generateText: AiSdkGenerateTextLike = async (opts) => {
       seen.push(opts);
-      return { text: '## Goal\nX' };
+      return { text: VALID_SUMMARY };
     };
     const summarize = buildLlmHistorySummarizer({ resolveModel: () => 'fake-model', generateText });
 
@@ -247,7 +247,7 @@ describe('buildLlmHistorySummarizer', () => {
     const seen: Array<{ messages: unknown[] }> = [];
     const generateText: AiSdkGenerateTextLike = async (opts) => {
       seen.push(opts);
-      return { text: '## Goal\nX' };
+      return { text: VALID_SUMMARY };
     };
     const summarize = buildLlmHistorySummarizer({ resolveModel: () => 'fake-model', generateText });
 
@@ -313,7 +313,7 @@ describe('buildLlmHistorySummarizer', () => {
     const seen: Array<{ messages: unknown[] }> = [];
     const generateText: AiSdkGenerateTextLike = async (opts) => {
       seen.push(opts);
-      return { text: '## Goal\nX' };
+      return { text: VALID_SUMMARY };
     };
     const summarize = buildLlmHistorySummarizer({ resolveModel: () => 'fake-model', generateText });
 
@@ -497,7 +497,7 @@ describe('buildLlmHistorySummarizer', () => {
     const seen: Array<{ messages: unknown[] }> = [];
     const generateText: AiSdkGenerateTextLike = async (opts) => {
       seen.push(opts);
-      return { text: '## Goal\nX' };
+      return { text: VALID_SUMMARY };
     };
     const summarize = buildLlmHistorySummarizer({ resolveModel: () => 'fake-model', generateText });
 
