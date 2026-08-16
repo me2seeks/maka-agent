@@ -889,7 +889,7 @@ describe('buildLlmHistorySummarizer', () => {
       resolveModel: () => 'fake-model',
       generateText: async (options) => {
         seen = options.messages;
-        return { text: 'portable summary' };
+        return { text: VALID_SUMMARY };
       },
     });
     const old = ev({
