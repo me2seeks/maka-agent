@@ -95,7 +95,8 @@ export function findCheckpointSummaryDefect(
     return 'malformed_summary_truncated';
   }
   if (foldContext !== undefined) {
-    const charsPerToken = foldContext.charsPerToken ?? DEFAULT_CHARS_PER_TOKEN;
+    // Clamped so a zero/negative estimate cannot zero out the floor.
+    const charsPerToken = Math.max(1, foldContext.charsPerToken ?? DEFAULT_CHARS_PER_TOKEN);
     if (
       trimmed.length < LARGE_FOLD_SUMMARY_TOKENS_FLOOR * charsPerToken &&
       estimateRuntimeEventsTokens(foldContext.coveredRuntimeEvents, charsPerToken) >
@@ -136,11 +137,18 @@ function scanSummaryStructure(text: string): {
       const width = fence[1]!.length;
       if (openFence === undefined) {
         openFence = { family, width };
-      } else if (openFence.family === family && width >= openFence.width) {
+      } else if (
+        openFence.family === family &&
+        width >= openFence.width &&
+        line.trim() === fence[1]
+      ) {
+        // A closer must be a bare run of the same family, at least as long
+        // as the opener (an opener may carry an info string; a closer may
+        // not).
         openFence = undefined;
       } else {
-        // A shorter run or a different family does not close the fence; the
-        // line is fenced content of the enclosing section.
+        // Anything else — a shorter run, a different family, or trailing
+        // text — is fenced content of the enclosing section.
         countContent(line);
       }
       continue;

@@ -750,6 +750,21 @@ describe('buildLlmHistorySummarizer', () => {
     );
   });
 
+  test('a fence marker with trailing text is content, not a closer', async () => {
+    // CommonMark: an opener may carry an info string, a closer may not.
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({ text: `${VALID_SUMMARY}\n\n\`\`\`\ncode\n\`\`\` done` }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary_truncated/,
+    );
+  });
+
   test('a longer same-family run still closes a narrower fence', async () => {
     const closedByLonger = `${VALID_SUMMARY}\n\n\`\`\`\ncode\n\`\`\`\`\nafter`;
     const summarize = buildLlmHistorySummarizer({

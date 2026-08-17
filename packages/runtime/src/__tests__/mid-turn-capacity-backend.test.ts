@@ -462,7 +462,13 @@ function buildFixture(options: MidTurnFixtureOptions = {}): MidTurnFixture {
           } satisfies HistoryCompactProviderState)
         : options.summarize
           ? await options.summarize(input)
-          : 'MID_TURN_SUMMARY_SENTINEL';
+          : `## Goal\nMID_TURN_SUMMARY_SENTINEL\n\n## Progress\n${
+              // Padded proportionally so the write gate's size floor passes
+              // for large folds while small folds keep a compact replacement.
+              JSON.stringify(input.source.foldedRuntimeEvents).length > 30_000
+                ? `- ${'covered '.repeat(150)}`
+                : '- done'
+            }\n\n## Next Steps\n1. continue\n\n## Critical Context\n- (none)`;
       return summary;
     },
     ...(options.meteredSummarizer
@@ -1127,7 +1133,10 @@ function defineMidTurnSuite(consumer: ConsumerMode): void {
     // projection; the hook measures the materialized payload and keeps the raw
     // messages instead. Validation runs before the recorder, so the rejected
     // checkpoint is never persisted (asserted below).
-    const fixture = buildFixture({ summarize: () => 'GIANT_SUMMARY_'.repeat(600) });
+    const fixture = buildFixture({
+      summarize: () =>
+        `## Goal\n${'GIANT_SUMMARY_'.repeat(600)}\n\n## Progress\n- done\n\n## Next Steps\n1. continue\n\n## Critical Context\n- (none)`,
+    });
     await runFixtureTurn(fixture, consumer);
 
     assert.equal(fixture.model.doStreamCalls.length, 3);
@@ -1225,7 +1234,8 @@ function defineMidTurnSuite(consumer: ConsumerMode): void {
     const fixture = buildFixture({
       contextWindow: 150,
       reserveTokens: 100,
-      summarize: () => 'GIANT_SUMMARY_'.repeat(600),
+      summarize: () =>
+        `## Goal\n${'GIANT_SUMMARY_'.repeat(600)}\n\n## Progress\n- done\n\n## Next Steps\n1. continue\n\n## Critical Context\n- (none)`,
     });
     await runFixtureTurn(fixture, consumer);
 
