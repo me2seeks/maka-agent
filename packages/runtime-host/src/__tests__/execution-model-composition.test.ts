@@ -101,6 +101,9 @@ const COMPACT_SUMMARY_TEXT = [
   '',
   '## Next Steps',
   '1. continue',
+  '',
+  '## Critical Context',
+  '- (none)',
 ].join('\n');
 const CLIENT_CAPABILITY_RESULT_TEXT = 'HOSTED_CLIENT_CAPABILITY_RESULT_SENTINEL';
 const CHILD_AGENT_RESULT_TEXT = 'HOSTED_CHILD_AGENT_RESULT_SENTINEL';

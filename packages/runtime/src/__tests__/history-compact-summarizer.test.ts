@@ -19,6 +19,7 @@ import {
   type AiSdkGenerateTextLike,
 } from '../history-compact-summarizer.js';
 import { buildHistoryCompactCheckpoint } from '../history-compact-checkpoint.js';
+import { SUMMARY_FORMAT_TEMPLATE } from '../history-compact-summary-validation.js';
 
 const ts = 1_700_000_000_000;
 let __seq = 0;
@@ -47,6 +48,9 @@ const VALID_SUMMARY = [
   '',
   '## Next Steps',
   '1. continue',
+  '',
+  '## Critical Context',
+  '- (none)',
 ].join('\n');
 
 function inputWith(events: RuntimeEvent[], abortSignal?: AbortSignal): HistoryCompactSummaryInput {
@@ -662,6 +666,102 @@ describe('buildLlmHistorySummarizer', () => {
     );
   });
 
+  test('requires the Critical Context section the incident lost', async () => {
+    // Files, commands, and errors live in Critical Context — exactly the
+    // information whose loss made the #3029 continuation confabulate. The
+    // template offers an explicit "(none)" escape hatch, so a summary simply
+    // omitting the section is a defect, not a style choice.
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({
+        text: '## Goal\nX\n\n## Progress\n- done\n\n## Next Steps\n1. continue',
+      }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary_missing_section/,
+    );
+  });
+
+  test('an unfenced verbatim echo of the prompt template is not a checkpoint', async () => {
+    // A degraded model can parrot the mandated format back with all the
+    // placeholder lines intact; every heading is present and every section
+    // "has content", but none of it is information. Template lines never
+    // count as section content.
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({ text: SUMMARY_FORMAT_TEMPLATE.join('\n') }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary_missing_section/,
+    );
+  });
+
+  test('a four-backtick fence is not closed by a three-backtick line', async () => {
+    // Markdown closes a fence only with a run at least as long as the
+    // opener. A template echo wrapped in ````markdown with a ``` line inside
+    // used to be misread as closed, letting the fenced headings count as
+    // structure.
+    const fourFenceEcho = [
+      '````markdown',
+      '## Goal',
+      'echoed goal',
+      '```',
+      '## Progress',
+      'echoed progress',
+      '## Next Steps',
+      'echoed next',
+      '## Critical Context',
+      'echoed context',
+      '````',
+    ].join('\n');
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({ text: fourFenceEcho }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary_missing_section/,
+    );
+  });
+
+  test('a trailing shorter run leaves a wide fence open: truncation', async () => {
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({ text: `${VALID_SUMMARY}\n\n\`\`\`\`\ncode\n\`\`\`` }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary_truncated/,
+    );
+  });
+
+  test('a longer same-family run still closes a narrower fence', async () => {
+    const closedByLonger = `${VALID_SUMMARY}\n\n\`\`\`\ncode\n\`\`\`\`\nafter`;
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({ text: closedByLonger }),
+    });
+
+    const result = await summarize(
+      inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+    );
+    expect(result).toBe(closedByLonger);
+  });
+
   test('rejects a heading-only skeleton with no section content', async () => {
     const summarize = buildLlmHistorySummarizer({
       resolveModel: () => 'fake-model',
@@ -709,7 +809,7 @@ describe('buildLlmHistorySummarizer', () => {
   test('rejects a structured summary that ends mid-sentence on a trailing colon', async () => {
     const summarize = buildLlmHistorySummarizer({
       resolveModel: () => 'fake-model',
-      generateText: async () => ({ text: `${VALID_SUMMARY}\n\n## Critical Context\n- 然后：` }),
+      generateText: async () => ({ text: `${VALID_SUMMARY}\n- 然后：` }),
     });
 
     await assert.rejects(
@@ -735,7 +835,7 @@ describe('buildLlmHistorySummarizer', () => {
   });
 
   test('a verbatim inline fence marker in a preserved error message is not truncation', async () => {
-    const withInlineFence = `${VALID_SUMMARY}\n\n## Critical Context\n- markdown lint: unexpected \`\`\` at line 12`;
+    const withInlineFence = `${VALID_SUMMARY}\n- markdown lint: unexpected \`\`\` at line 12`;
     const summarize = buildLlmHistorySummarizer({
       resolveModel: () => 'fake-model',
       generateText: async () => ({ text: withInlineFence }),
@@ -811,6 +911,9 @@ describe('buildLlmHistorySummarizer', () => {
       '',
       '## Next Steps',
       '1. continue',
+      '',
+      '## Critical Context',
+      '- (none)',
     ].join('\n');
     const summarize = buildLlmHistorySummarizer({
       resolveModel: () => 'fake-model',

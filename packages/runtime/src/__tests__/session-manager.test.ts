@@ -3952,7 +3952,7 @@ describe('SessionManager manual compaction and quiescent session changes', () =>
             type: 'text',
             // Structured so it passes the summarizer's checkpoint validation
             // (#3029) while keeping the sentinel greppable.
-            text: '## Goal\nMANUAL_COMPACT_SUMMARY\n\n## Progress\n- done\n\n## Next Steps\n1. continue',
+            text: '## Goal\nMANUAL_COMPACT_SUMMARY\n\n## Progress\n- done\n\n## Next Steps\n1. continue\n\n## Critical Context\n- (none)',
           },
         ],
         finishReason: { unified: 'stop', raw: 'stop' },

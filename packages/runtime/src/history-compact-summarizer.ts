@@ -1,7 +1,9 @@
-import type { RuntimeEvent } from '@maka/core/runtime-event';
 import { rawFinishReasonString, type ModelMessage, type ToolCallPart } from './model-protocol.js';
 import { buildRuntimeEventModelReplayPlan } from './model-history.js';
-import { estimateRuntimeEventsTokens } from './context-budget-helpers.js';
+import {
+  findCheckpointSummaryDefect,
+  SUMMARY_FORMAT_TEMPLATE,
+} from './history-compact-summary-validation.js';
 import { toolResultOutput } from './tool-result-output.js';
 import type { HistoryCompactSummaryInput } from './ai-sdk-compaction-contract.js';
 import { HistoryCompactSummarizerError } from './history-compact-error.js';
@@ -36,16 +38,12 @@ export interface BuildLlmHistorySummarizerOptions {
   generateText?: AiSdkGenerateTextLike;
 }
 
-// The sections a completion must carry to be allowed to REPLACE folded
-// history (#3029). The prompt below is built from the same constants so the
-// mandated format and the validation can never drift apart.
-const REQUIRED_SUMMARY_SECTIONS = ['## Goal', '## Progress', '## Next Steps'] as const;
-const [GOAL_SECTION, PROGRESS_SECTION, NEXT_STEPS_SECTION] = REQUIRED_SUMMARY_SECTIONS;
-
 // Conversation-summarization prompt (sectioned, modelled on pi/opencode):
 // asks for a checkpoint another LLM can continue from. Tool calls and their
 // results are part of the conversation sent to the summarizer, because the
 // folded events are projected with the same policy the model would see them.
+// The format block is the validation module's template, so the mandated
+// format and the validation can never drift apart.
 const SUMMARIZATION_SYSTEM_PROMPT = [
   'You are a context summarization assistant.',
   'Read the conversation between a user and an AI assistant, then produce a structured summary another LLM will use to continue the same task.',
@@ -53,23 +51,7 @@ const SUMMARIZATION_SYSTEM_PROMPT = [
   '',
   'Use this exact format:',
   '',
-  GOAL_SECTION,
-  '[What the user is trying to accomplish]',
-  '',
-  PROGRESS_SECTION,
-  '### Done',
-  '- [Completed work and changes]',
-  '### In Progress',
-  '- [Current work]',
-  '',
-  '## Key Decisions',
-  '- **[Decision]**: [Brief rationale]',
-  '',
-  NEXT_STEPS_SECTION,
-  '1. [Ordered list of what should happen next]',
-  '',
-  '## Critical Context',
-  '- [Files, commands/results, errors, anything needed to continue; or "(none)"]',
+  ...SUMMARY_FORMAT_TEMPLATE,
   '',
   'Keep each section concise. Preserve exact file paths, function names, commands, and error messages.',
 ].join('\n');
@@ -130,106 +112,18 @@ export function buildLlmHistorySummarizer(options: BuildLlmHistorySummarizerOpti
       if (rawFinishReasonString(result.finishReason) === 'length') {
         throw new HistoryCompactSummarizerError('output_length');
       }
-      assertWellFormedCheckpointSummary(result.text, input.source.foldedRuntimeEvents);
+      const defect = findCheckpointSummaryDefect(result.text, {
+        coveredRuntimeEvents: input.source.foldedRuntimeEvents,
+        ...(input.inputBudget?.charsPerToken !== undefined
+          ? { charsPerToken: input.inputBudget.charsPerToken }
+          : {}),
+      });
+      if (defect) throw new HistoryCompactSummarizerError(defect);
       return result.text;
     } catch (error) {
       if (error instanceof HistoryCompactSummarizerError) throw error;
       throw new HistoryCompactSummarizerError('provider_error', { cause: error });
     }
-  };
-}
-
-// Floors for the incident's shape: folding a large span into a paragraph
-// cannot be a faithful checkpoint. Folds above ~10k estimated tokens (at the
-// default 4-chars/token estimate) require at least ~200 estimated tokens of
-// summary.
-const LARGE_FOLD_ESTIMATED_TOKENS = 10_000;
-const LARGE_FOLD_SUMMARY_CHARS_FLOOR = 800;
-
-// #3029: a degraded provider completion — a 138-token free-form fragment
-// ending mid-sentence, delivered with a stop finish reason — was accepted as
-// the checkpoint for ~235k estimated tokens of history, and the continuation
-// confabulated around the missing context. Anything that does not look like
-// the checkpoint the prompt mandates fails open instead (history kept,
-// compaction retried). The size floor is measured against the FULL covered
-// span the checkpoint replaces, not the newly folded increment, so rolling
-// roll-forward compaction cannot slip a fragment past it.
-function assertWellFormedCheckpointSummary(
-  summary: string,
-  coveredRuntimeEvents: readonly RuntimeEvent[],
-): void {
-  const trimmed = summary.trim();
-  // The compaction layer's empty_summary gate owns the empty case.
-  if (trimmed.length === 0) return;
-  const scan = scanSummaryStructure(trimmed);
-  if (!scan.orderedSectionsPresent) {
-    throw new HistoryCompactSummarizerError('malformed_summary_missing_section');
-  }
-  // A trailing colon or ending inside an open code fence marks output cut
-  // mid-sentence — seen with partial completions the provider still finished
-  // with 'stop'.
-  if (/[:：]$/.test(trimmed) || scan.endsInsideOpenFence) {
-    throw new HistoryCompactSummarizerError('malformed_summary_truncated');
-  }
-  if (
-    trimmed.length < LARGE_FOLD_SUMMARY_CHARS_FLOOR &&
-    estimateRuntimeEventsTokens(coveredRuntimeEvents) > LARGE_FOLD_ESTIMATED_TOKENS
-  ) {
-    throw new HistoryCompactSummarizerError('malformed_summary_too_small_for_fold');
-  }
-}
-
-// One line scan holding a single interpretation of the document for both
-// checks: the mandated sections must appear in order, each with non-empty
-// content, and only OUTSIDE fenced code blocks — a degraded model quoting the
-// template inside a fence must not count as structure. Fences (backtick or
-// tilde, line-opening only, so a verbatim ``` inside a preserved error
-// message stays content) also report whether the document ends inside one.
-function scanSummaryStructure(text: string): {
-  orderedSectionsPresent: boolean;
-  endsInsideOpenFence: boolean;
-} {
-  let fenceFamily: string | undefined;
-  let matchedSections = 0;
-  const sectionHasContent: boolean[] = REQUIRED_SUMMARY_SECTIONS.map(() => false);
-  for (const line of text.split('\n')) {
-    const fence = /^\s*(`{3,}|~{3,})/.exec(line);
-    if (fence) {
-      const family = fence[1]![0]!;
-      if (fenceFamily === undefined) fenceFamily = family;
-      else if (fenceFamily === family) fenceFamily = undefined;
-      continue;
-    }
-    if (fenceFamily !== undefined) {
-      // Fenced lines are content of the enclosing section, never headings.
-      if (matchedSections > 0 && line.trim().length > 0) {
-        sectionHasContent[matchedSections - 1] = true;
-      }
-      continue;
-    }
-    if (
-      matchedSections < REQUIRED_SUMMARY_SECTIONS.length &&
-      new RegExp(`^${REQUIRED_SUMMARY_SECTIONS[matchedSections]}\\b`).test(line)
-    ) {
-      matchedSections += 1;
-      continue;
-    }
-    // Anything non-blank that is not itself a heading or a thematic break
-    // counts as content for the most recently matched section (subheadings
-    // organize, lists carry, horizontal rules separate).
-    if (
-      matchedSections > 0 &&
-      line.trim().length > 0 &&
-      !/^#{1,6}\s/.test(line) &&
-      !/^\s*([-*_])\s*(?:\1\s*){2,}$/.test(line)
-    ) {
-      sectionHasContent[matchedSections - 1] = true;
-    }
-  }
-  return {
-    orderedSectionsPresent:
-      matchedSections === REQUIRED_SUMMARY_SECTIONS.length && sectionHasContent.every(Boolean),
-    endsInsideOpenFence: fenceFamily !== undefined,
   };
 }
 
