@@ -365,7 +365,8 @@ describe('buildLlmHistorySummarizer', () => {
     let seen: Parameters<AiSdkGenerateTextLike>[0] | undefined;
     const generateText: AiSdkGenerateTextLike = async (options) => {
       seen = options;
-      return { text: '## Goal\nX' };
+      // Proportionate to the large folded span so the size floor passes.
+      return { text: VALID_SUMMARY.replace('- done', `- ${'done '.repeat(200)}`) };
     };
     const summarize = buildLlmHistorySummarizer({ resolveModel: () => 'fake-model', generateText });
     const oldToolOutput = 'OLD_OVERSIZED_TOOL_OUTPUT_'.repeat(1_024);
