@@ -806,6 +806,53 @@ describe('buildLlmHistorySummarizer', () => {
     );
   });
 
+  test('content under a non-required section cannot satisfy a required one', async () => {
+    // "## Key Decisions" opens its own section; its bullets must not stand in
+    // for an empty "## Progress" above it.
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({
+        text: '## Goal\nX\n\n## Progress\n\n## Key Decisions\n- decided something\n\n## Next Steps\n1. continue\n\n## Critical Context\n- (none)',
+      }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary_missing_section/,
+    );
+  });
+
+  test('accepts a well-formed summary with CRLF line endings', async () => {
+    const crlf = VALID_SUMMARY.replaceAll('\n', '\r\n');
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({ text: crlf }),
+    });
+
+    const result = await summarize(
+      inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+    );
+    expect(result).toBe(crlf);
+  });
+
+  test('CRLF horizontal rules are still separators, not section content', async () => {
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({
+        text: '## Goal\r\n---\r\n## Progress\r\n***\r\n## Next Steps\r\n- - -\r\n## Critical Context\r\n---',
+      }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary_missing_section/,
+    );
+  });
+
   test('rejects the mandated sections when they appear out of order', async () => {
     const summarize = buildLlmHistorySummarizer({
       resolveModel: () => 'fake-model',

@@ -122,15 +122,21 @@ function scanSummaryStructure(text: string): {
 } {
   let openFence: { family: string; width: number } | undefined;
   let matchedSections = 0;
+  // Content attribution target: content lines satisfy the most recently
+  // matched REQUIRED section, but an intervening unmatched H2 (e.g. the
+  // template's "## Key Decisions") opens its own section — its content must
+  // not satisfy the previous required section's non-empty requirement.
+  let attributesToRequiredSection = false;
   const sectionHasContent: boolean[] = REQUIRED_SUMMARY_SECTIONS.map(() => false);
   const countContent = (line: string) => {
-    if (matchedSections === 0) return;
+    if (matchedSections === 0 || !attributesToRequiredSection) return;
     const trimmedLine = line.trim();
     if (trimmedLine.length === 0) return;
     if (TEMPLATE_PLACEHOLDER_LINES.has(trimmedLine)) return;
     sectionHasContent[matchedSections - 1] = true;
   };
-  for (const line of text.split('\n')) {
+  // Normalized so CRLF input cannot smuggle a trailing \r past any line check.
+  for (const line of text.split(/\r?\n/)) {
     const fence = /^\s*(`{3,}|~{3,})/.exec(line);
     if (fence) {
       const family = fence[1]![0]!;
@@ -163,6 +169,13 @@ function scanSummaryStructure(text: string): {
       SECTION_HEAD_PATTERNS[matchedSections]!.test(line)
     ) {
       matchedSections += 1;
+      attributesToRequiredSection = true;
+      continue;
+    }
+    // Any other H2 opens its own (non-required) section; deeper headings
+    // organize within the current one.
+    if (/^##\s/.test(line)) {
+      attributesToRequiredSection = false;
       continue;
     }
     // Anything non-blank that is not itself a heading, a thematic break, or
