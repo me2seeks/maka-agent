@@ -133,6 +133,9 @@ function scanSummaryStructure(text: string): {
     const trimmedLine = line.trim();
     if (trimmedLine.length === 0) return;
     if (TEMPLATE_PLACEHOLDER_LINES.has(trimmedLine)) return;
+    // A bare fence-marker run carries no checkpoint information, so nested
+    // fence delimiters cannot satisfy a section's non-empty requirement.
+    if (/^(`{3,}|~{3,})$/.test(trimmedLine)) return;
     sectionHasContent[matchedSections - 1] = true;
   };
   // Normalized so CRLF input cannot smuggle a trailing \r past any line check.

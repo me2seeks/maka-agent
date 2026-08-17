@@ -765,6 +765,24 @@ describe('buildLlmHistorySummarizer', () => {
     );
   });
 
+  test('nested bare fence markers are not section content', async () => {
+    // A section whose only lines are fence delimiters carries no information;
+    // the inner shorter run must not satisfy the non-empty requirement.
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({
+        text: '## Goal\n````\n```\n````\n\n## Progress\n- done\n\n## Next Steps\n1. continue\n\n## Critical Context\n- (none)',
+      }),
+    });
+
+    await assert.rejects(
+      summarize(
+        inputWith([ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'hi' } })]),
+      ),
+      /malformed_summary_missing_section/,
+    );
+  });
+
   test('a longer same-family run still closes a narrower fence', async () => {
     const closedByLonger = `${VALID_SUMMARY}\n\n\`\`\`\ncode\n\`\`\`\`\nafter`;
     const summarize = buildLlmHistorySummarizer({
