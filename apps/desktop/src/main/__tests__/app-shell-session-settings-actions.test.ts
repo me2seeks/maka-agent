@@ -71,6 +71,7 @@ function createHarness(options: {
   const permissionCalls: string[] = [];
   const thinkingCalls: string[] = [];
   const errors: string[] = [];
+  const errorDescriptions: Array<string | undefined> = [];
   const errorTargets: Array<{ sessionId: string } | undefined> = [];
   const successes: Array<{ title: string; description?: string }> = [];
   const newTaskPermissionModes: string[] = [];
@@ -121,8 +122,9 @@ function createHarness(options: {
     },
     toastApi: {
       success: (title, description) => successes.push({ title, description }),
-      error: (title, _description, _details, target) => {
+      error: (title, description, _details, target) => {
         errors.push(title);
+        errorDescriptions.push(description);
         errorTargets.push(target);
       },
       confirm: options.confirm ?? (async () => true),
@@ -133,6 +135,7 @@ function createHarness(options: {
     actions,
     activeIdRef,
     errors,
+    errorDescriptions,
     errorTargets,
     modelCalls,
     modelResult,
@@ -359,5 +362,20 @@ describe('AppShell session settings actions', () => {
     assert.deepEqual(harness.modelCalls, ['session-a']);
     harness.modelResult.resolve(session('session-a'));
     await modelChange;
+  });
+
+  it('points a failed account-and-model switch at credential recovery', async () => {
+    const harness = createHarness();
+
+    const modelChange = harness.actions.setSessionModel({
+      llmConnectionId: 'connection-1',
+      llmConnectionSlug: 'e2e',
+      model: 'claude-opus',
+    });
+    harness.modelResult.reject(new Error('fixture failure'));
+    await modelChange;
+
+    assert.match(harness.errorDescriptions[0] ?? '', /设置 · 模型/);
+    assert.match(harness.errorDescriptions[0] ?? '', /登录或 API Key/);
   });
 });
