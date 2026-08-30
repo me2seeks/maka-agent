@@ -34,11 +34,25 @@ export interface SessionCollaborationMountSummary {
   readonly name: string;
 }
 
+export type SessionCollaborationImportPhase =
+  | 'validating_invitation'
+  | 'discovering_host'
+  | 'preparing_route'
+  | 'connecting'
+  | 'authenticating'
+  | 'finalizing_access'
+  | 'loading_session';
+
+export type SessionCollaborationCancelResult = 'cancelled' | 'settling' | 'idle';
+
 export interface SessionCollaborationServices {
   importInvitation(input: {
     readonly code: string;
     readonly allowInsecure: boolean;
-  }): Promise<SessionCollaborationImportResult>;
+    readonly operationId: string;
+  }, onProgress?: (phase: SessionCollaborationImportPhase) => void): Promise<SessionCollaborationImportResult>;
+  cancelImport(operationId: string): Promise<SessionCollaborationCancelResult>;
   listMounts(): Promise<readonly SessionCollaborationMountSummary[]>;
   removeMount(mountId: string): Promise<void>;
+  createOperationId(): string;
 }

@@ -22,11 +22,16 @@ import {
   decodeRemoteRuntimeHostProfile,
   RUNTIME_HOST_ACCESS_CREDENTIAL_MAX_BYTES,
   type ResolvedRuntimeHostProfile,
+  type RuntimeHostConnectionPhase,
   type RuntimeHostRemoteTransport,
 } from '@maka/runtime-host/client';
 import { decodeCollaborationInvitationCode } from '@maka/runtime-host/protocol';
 import type { CredentialStore } from '@maka/storage/credential-store';
-import type { DesktopSessionCollaborationImportResult } from '../preload/bridge-contract.js';
+import type {
+  DesktopSessionCollaborationCancelResult,
+  DesktopSessionCollaborationImportPhase,
+  DesktopSessionCollaborationImportResult,
+} from '../preload/bridge-contract.js';
 import { decodeDesktopCollaborationInvitation } from './runtime-host-collaboration-invitation.js';
 
 const STORE_SCHEMA_VERSION = 1;
@@ -63,7 +68,10 @@ export interface DesktopGuestSessionMountService {
   importInvitation(
     code: string,
     allowInsecure: boolean,
+    operationId: string,
+    onProgress?: (phase: DesktopSessionCollaborationImportPhase) => void,
   ): Promise<DesktopSessionCollaborationImportResult>;
+  cancelImport(operationId: string): DesktopSessionCollaborationCancelResult;
   remove(mountId: string): Promise<void>;
   close(): Promise<void>;
 }
@@ -97,7 +105,11 @@ export function createGuestSessionMountStore(
 
 export function createDesktopGuestSessionMountService(input: {
   readonly store: GuestSessionMountStore;
-  readonly mount: (target: ResolvedRuntimeHostProfile, signal: AbortSignal) => Promise<void>;
+  readonly mount: (
+    target: ResolvedRuntimeHostProfile,
+    signal: AbortSignal,
+    onConnectionPhase?: (phase: RuntimeHostConnectionPhase) => void,
+  ) => Promise<void>;
   readonly finalizeAccess: (mountId: string, signal: AbortSignal) => Promise<void>;
   readonly unmount: (mountId: string) => Promise<void>;
   readonly wait?: (delayMs: number, signal: AbortSignal) => Promise<void>;
@@ -108,8 +120,11 @@ export function createDesktopGuestSessionMountService(input: {
     console.warn(`[runtime-host] shared Session ${mount.mountId} is unavailable:`, error);
   });
   const controllers = new Map<string, AbortController>();
-  const importControllers = new Set<AbortController>();
-  const importTasks = new Set<Promise<DesktopSessionCollaborationImportResult>>();
+  const importOperations = new Map<
+    string,
+    { readonly controller: AbortController; stage: 'connecting' | 'finalizing' }
+  >();
+  const importTasks = new Map<string, Promise<DesktopSessionCollaborationImportResult>>();
   const tasks = new Map<string, Promise<void>>();
   let mounts: Map<string, GuestSessionMount> | undefined;
   let mutationTail = Promise.resolve();
@@ -134,9 +149,18 @@ export function createDesktopGuestSessionMountService(input: {
     mounts = next;
   };
 
-  const activate = async (mount: GuestSessionMount, signal: AbortSignal): Promise<void> => {
-    await input.mount(resolveMountTarget(mount), signal);
+  const activate = async (
+    mount: GuestSessionMount,
+    signal: AbortSignal,
+    onProgress?: (phase: DesktopSessionCollaborationImportPhase) => void,
+    onFinalizing?: () => void,
+  ): Promise<void> => {
+    await input.mount(resolveMountTarget(mount), signal, (phase) => {
+      reportImportProgress(onProgress, collaborationProgressForConnectionPhase(phase));
+    });
     signal.throwIfAborted();
+    onFinalizing?.();
+    reportImportProgress(onProgress, 'finalizing_access');
     await input.finalizeAccess(mount.mountId, signal);
     signal.throwIfAborted();
   };
@@ -187,8 +211,11 @@ export function createDesktopGuestSessionMountService(input: {
   const runImport = async (
     code: string,
     allowInsecure: boolean,
-    controller: AbortController,
+    operation: { readonly controller: AbortController; stage: 'connecting' | 'finalizing' },
+    onProgress?: (phase: DesktopSessionCollaborationImportPhase) => void,
   ): Promise<DesktopSessionCollaborationImportResult> => {
+    const { controller } = operation;
+    reportImportProgress(onProgress, 'validating_invitation');
     controller.signal.throwIfAborted();
     let bundle;
     let invitation;
@@ -224,7 +251,10 @@ export function createDesktopGuestSessionMountService(input: {
     }
     controllers.set(mount.mountId, controller);
     try {
-      await activate(mount, controller.signal);
+      reportImportProgress(onProgress, 'discovering_host');
+      await activate(mount, controller.signal, onProgress, () => {
+        operation.stage = 'finalizing';
+      });
       controller.signal.throwIfAborted();
       if (!(await load()).has(mount.mountId)) {
         throw new Error('Shared Session mount was removed while connecting');
@@ -251,16 +281,24 @@ export function createDesktopGuestSessionMountService(input: {
   const importInvitation = (
     code: string,
     allowInsecure: boolean,
+    operationId: string,
+    onProgress?: (phase: DesktopSessionCollaborationImportPhase) => void,
   ): Promise<DesktopSessionCollaborationImportResult> => {
     if (closed) return Promise.reject(new Error('Shared Session mount service is closed'));
+    if (importOperations.has(operationId)) {
+      return Promise.reject(new Error('Shared Session import operation is already active'));
+    }
     const controller = new AbortController();
-    importControllers.add(controller);
+    const operation = { controller, stage: 'connecting' as const };
+    importOperations.set(operationId, operation);
     let task!: Promise<DesktopSessionCollaborationImportResult>;
-    task = runImport(code, allowInsecure, controller).finally(() => {
-      importControllers.delete(controller);
-      importTasks.delete(task);
+    task = runImport(code, allowInsecure, operation, onProgress).finally(() => {
+      if (importOperations.get(operationId) === operation) {
+        importOperations.delete(operationId);
+      }
+      if (importTasks.get(operationId) === task) importTasks.delete(operationId);
     });
-    importTasks.add(task);
+    importTasks.set(operationId, task);
     return task;
   };
 
@@ -279,20 +317,37 @@ export function createDesktopGuestSessionMountService(input: {
 
     importInvitation,
 
+    cancelImport(operationId) {
+      const operation = importOperations.get(operationId);
+      if (!operation) return 'idle';
+      if (operation.stage === 'finalizing') return 'settling';
+      operation.controller.abort(new Error('Shared Session import was cancelled'));
+      return 'cancelled';
+    },
+
     remove,
 
     async close() {
       closed = true;
+      const finalizingControllers = new Set(
+        [...importOperations.values()]
+          .filter(({ stage }) => stage === 'finalizing')
+          .map(({ controller }) => controller),
+      );
       for (const controller of controllers.values()) {
-        controller.abort(new Error('Shared Session mount service is closed'));
+        if (!finalizingControllers.has(controller)) {
+          controller.abort(new Error('Shared Session mount service is closed'));
+        }
       }
-      for (const controller of importControllers) {
-        controller.abort(new Error('Shared Session mount service is closed'));
+      for (const operation of importOperations.values()) {
+        if (operation.stage === 'connecting') {
+          operation.controller.abort(new Error('Shared Session mount service is closed'));
+        }
       }
-      await Promise.allSettled([...importTasks, ...tasks.values()]);
+      await Promise.allSettled([...importTasks.values(), ...tasks.values()]);
       await mutationTail;
       controllers.clear();
-      importControllers.clear();
+      importOperations.clear();
     },
   };
 }
@@ -303,14 +358,25 @@ export function registerDesktopGuestSessionMountIpc(
 ): () => void {
   const channels = [
     'session-collaboration:import',
+    'session-collaboration:import:cancel',
     'session-collaboration:mount:list',
     'session-collaboration:mount:remove',
   ] as const;
-  ipcMain.handle(channels[0], (_event, code: string, allowInsecure: boolean) =>
-    service.importInvitation(code, allowInsecure),
+  ipcMain.handle(
+    channels[0],
+    (event, code: string, allowInsecure: boolean, operationIdValue: unknown) => {
+      const operationId = requireOperationId(operationIdValue);
+      return service.importInvitation(code, allowInsecure, operationId, (phase) => {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('session-collaboration:import:progress', operationId, phase);
+        }
+      });
+    },
   );
-  ipcMain.handle(channels[1], () => service.list());
-  ipcMain.handle(channels[2], (_event, mountId: string) => service.remove(mountId));
+  ipcMain.handle(channels[1], (_event, operationIdValue: unknown) =>
+    service.cancelImport(requireOperationId(operationIdValue)));
+  ipcMain.handle(channels[2], () => service.list());
+  ipcMain.handle(channels[3], (_event, mountId: string) => service.remove(mountId));
   return () => {
     for (const channel of channels) ipcMain.removeHandler(channel);
   };
@@ -378,6 +444,40 @@ function decodeMount(value: unknown): GuestSessionMount {
 function isPeerPathUnavailable(error: unknown): boolean {
   if (!isRecord(error) || typeof error.code !== 'string') return false;
   return error.code === 'direct_path_unavailable' || error.code === 'transit_unavailable';
+}
+
+function collaborationProgressForConnectionPhase(
+  phase: RuntimeHostConnectionPhase,
+): DesktopSessionCollaborationImportPhase {
+  switch (phase) {
+    case 'discovering':
+      return 'preparing_route';
+    case 'connecting':
+      return 'connecting';
+    case 'authenticating':
+      return 'authenticating';
+    case 'handshaking':
+    case 'waiting_for_ready':
+      return 'loading_session';
+  }
+}
+
+function reportImportProgress(
+  observer: ((phase: DesktopSessionCollaborationImportPhase) => void) | undefined,
+  phase: DesktopSessionCollaborationImportPhase,
+): void {
+  try {
+    observer?.(phase);
+  } catch {
+    // Presentation progress cannot control the import lifecycle.
+  }
+}
+
+function requireOperationId(value: unknown): string {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(value)) {
+    throw new Error('Shared Session import operation ID is invalid');
+  }
+  return value;
 }
 
 function waitForDelay(delayMs: number, signal: AbortSignal): Promise<void> {

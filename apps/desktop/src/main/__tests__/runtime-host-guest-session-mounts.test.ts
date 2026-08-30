@@ -38,7 +38,7 @@ test('retains a successful Guest mount and rehydrates the same authority after r
     },
   });
 
-  const result = await first.importInvitation(invitation('guest-one'), false);
+  const result = await first.importInvitation(invitation('guest-one'), false, 'import-one');
   assert.equal(result.kind, 'connected');
   if (result.kind !== 'connected') return;
   await first.close();
@@ -67,7 +67,7 @@ test('removes failed activation desire instead of creating recoverable profile s
     },
   });
 
-  const result = await mounts.importInvitation(invitation('guest-two'), false);
+  const result = await mounts.importInvitation(invitation('guest-two'), false, 'import-two');
   assert.deepEqual(result.kind === 'error' ? result.reason : result.kind, 'peer_path_unavailable');
   assert.deepEqual(await store.read(), []);
   assert.equal(unmounted.length, 1);
@@ -81,7 +81,7 @@ test('commits unmount desire before best-effort connection cleanup', async () =>
       throw new Error('connection shutdown failed');
     },
   });
-  const result = await mounts.importInvitation(invitation('guest-three'), false);
+  const result = await mounts.importInvitation(invitation('guest-three'), false, 'import-three');
   assert.equal(result.kind, 'connected');
   if (result.kind !== 'connected') return;
 
@@ -89,27 +89,65 @@ test('commits unmount desire before best-effort connection cleanup', async () =>
   assert.deepEqual(await store.read(), []);
 });
 
-test('awaits durable import rollback when closing during finalization', async () => {
+test('settles admitted credential finalization before closing the mount service', async () => {
   const store = memoryStore();
   let started!: () => void;
+  let finish!: () => void;
   const finalizing = new Promise<void>((resolve) => {
     started = resolve;
   });
+  const finalized = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
   const mounts = service(store, {
-    finalizeAccess: async (_mountId, signal) => {
+    finalizeAccess: async () => {
       started();
+      await finalized;
+    },
+  });
+
+  const importing = mounts.importInvitation(invitation('guest-closing'), false, 'import-closing');
+  await finalizing;
+  assert.equal(mounts.cancelImport('import-closing'), 'settling');
+  let closed = false;
+  const closing = mounts.close().then(() => {
+    closed = true;
+  });
+  await Promise.resolve();
+  assert.equal(closed, false);
+  finish();
+  await closing;
+
+  assert.equal((await importing).kind, 'connected');
+  assert.equal((await store.read()).length, 1);
+});
+
+test('cancels an in-flight import and removes its durable mount desire', async () => {
+  const store = memoryStore();
+  let connecting!: () => void;
+  const started = new Promise<void>((resolve) => {
+    connecting = resolve;
+  });
+  const mounts = service(store, {
+    mount: async (_target, signal) => {
+      connecting();
       await new Promise<void>((_resolve, reject) => {
         signal.addEventListener('abort', () => reject(signal.reason), { once: true });
       });
     },
   });
 
-  const importing = mounts.importInvitation(invitation('guest-closing'), false);
-  await finalizing;
-  await mounts.close();
+  const importing = mounts.importInvitation(
+    invitation('guest-cancelled'),
+    false,
+    'import-cancelled',
+  );
+  await started;
+  assert.equal(mounts.cancelImport('import-cancelled'), 'cancelled');
 
   assert.equal((await importing).kind, 'error');
   assert.deepEqual(await store.read(), []);
+  await mounts.close();
 });
 
 function service(
