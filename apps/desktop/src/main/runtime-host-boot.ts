@@ -1751,12 +1751,19 @@ async function closeRuntimeHostDesktop(): Promise<void> {
   updateService.dispose();
   settingsBotsIpc?.dispose();
   permissionOverlay.dismiss();
+  const guestMountShutdown = Promise.resolve().then(() => guestSessionMountService.close());
+  const runtimeHostManagerShutdown = guestMountShutdown
+    .catch(() => undefined)
+    .then(() => runtimeHostManager?.close());
+  const runtimeHostPeerShutdown = runtimeHostManagerShutdown
+    .catch(() => undefined)
+    .then(() => runtimeHostPeerOwner?.close() ?? runtimeHostPeerClient?.close());
   const results = await Promise.allSettled([
     Promise.resolve().then(() => runtimeHostManagement.close()),
     Promise.resolve().then(() => runtimeHostPeerMeshManagement.close()),
-    Promise.resolve().then(() => guestSessionMountService.close()),
-    runtimeHostManager?.close(),
-    runtimeHostPeerOwner?.close() ?? runtimeHostPeerClient?.close(),
+    guestMountShutdown,
+    runtimeHostManagerShutdown,
+    runtimeHostPeerShutdown,
     runtimeHostOnboarding.close(),
     localRuntimeHostRemoteAccess.close(),
     runtimeHostSetupPackage.close(),
