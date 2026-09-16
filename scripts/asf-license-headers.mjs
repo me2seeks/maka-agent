@@ -229,6 +229,7 @@ export const exclusionRules = [
       'docs/astryx-surface-file-inventory.paths',
       'docs/windows-test-inventory.md',
       'native/gitoxide-helper/Cargo.lock',
+      'Cargo.lock',
       'native/runtime-host-peer/Cargo.lock',
       'native/runtime-host-windows-task-launcher/Cargo.lock',
       'packages/runtime/src/bundled-skill-catalog.generated.ts',

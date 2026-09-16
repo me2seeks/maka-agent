@@ -1,0 +1,93 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: Maka TUI source admission
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/maka-tui-admission.yml'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'deny.toml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/maka-tui-admission.yml'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'deny.toml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maka-tui-admission-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source:
+    name: ${{ matrix.os }} source checks
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    env:
+      CARGO_BUILD_JOBS: '1'
+      RUST_TEST_THREADS: '1'
+    defaults:
+      run:
+        working-directory: crates/tui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.18.1
+      - name: Test the dependency-free TypeScript Companion
+        run: node --test --test-concurrency=1 tests/companion_wire.test.mjs
+      - name: Check formatting
+        run: cargo fmt -p maka-tui --check
+      - name: Check Clippy
+        run: cargo clippy --locked --all-targets -j 1 -- -D warnings
+      - name: Test interaction and lifecycle contracts
+        run: cargo test --locked -j 1 -- --test-threads=1
+      - name: Build the opt-in demo
+        run: cargo build --locked -j 1
+      - name: Test real Rust and Node IPC faults
+        run: python tests/companion_smoke.py
+      - name: Test Linux PTY lifecycle
+        if: runner.os == 'Linux'
+        run: python3 tests/pty_smoke.py
+      - name: Install dependency policy checker
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2
+        with:
+          tool: cargo-deny@0.20.2
+      - name: Check licenses and dependency sources
+        if: runner.os == 'Linux'
+        run: cargo deny --locked --config ../../deny.toml check licenses sources

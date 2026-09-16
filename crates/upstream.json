@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/apache/maka",
+  "branch": "feat/runtime-host-rust",
+  "commit": "98f40e46a855bb0817e563a878424559b5a42b3f",
+  "crates": ["protocol", "transport", "runtime", "presentation"],
+  "selection": ["Cargo.toml", "src"],
+  "tsHostCommit": "05d4d8ec45524f119c2dc1e4eae21826d6f90e7a",
+  "compatibilityEpoch": 154
+}

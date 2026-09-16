@@ -28,6 +28,7 @@ deepseek.key
 
 # Built only by the dedicated Gitoxide helper lane; normal workspace tests do not use Cargo.
 /native/gitoxide-helper/target/
+/target/
 /native/runtime-host-peer/target/
 /native/runtime-host-windows-task-launcher/target/
 
@@ -52,3 +53,4 @@ release/asf/
 # Astro type generation
 .astro
 perf-results/
+crates/tui/.development/
