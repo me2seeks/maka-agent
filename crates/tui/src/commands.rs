@@ -36,6 +36,7 @@ use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Command {
+    Requests,
     Help,
     Latest,
     Thinking,
@@ -58,6 +59,11 @@ const COMMANDS: &[(Command, &str, &str)] = &[
         "思考 推理 thinking reasoning",
     ),
     (Command::Preview, i18n::PREVIEW_LABEL, "预览 preview echo"),
+    (
+        Command::Requests,
+        "待处理请求",
+        "权限 授权 问题 表单 requests permission question form",
+    ),
 ];
 
 pub(crate) struct Commands {

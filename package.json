@@ -45,7 +45,7 @@
     "test:maka-tui": "cargo +1.98.0 test --locked --manifest-path crates/tui/Cargo.toml -j 1 -- --test-threads=1",
     "lint:maka-tui": "cargo +1.98.0 clippy --locked --all-targets --manifest-path crates/tui/Cargo.toml -j 1 -- -D warnings",
     "test:maka-tui-companion": "node --test --test-concurrency=1 crates/tui/tests/companion_wire.test.mjs",
-    "test:maka-tui-host": "node --test --test-concurrency=1 crates/tui/tests/host_reader.test.mjs crates/tui/tests/host_reader.integration.test.mjs crates/tui/tests/dev_entry.test.mjs",
+    "test:maka-tui-host": "node --test --test-concurrency=1 crates/tui/tests/host_reader.test.mjs crates/tui/tests/host_reader.integration.test.mjs crates/tui/tests/dev_entry.test.mjs crates/tui/tests/interaction_projection.test.mjs",
     "typecheck:maka-tui-companion": "tsc -p crates/tui/tsconfig.json",
     "build:runtime-host-peer": "node native/runtime-host-peer/build.mjs",
     "build:runtime-host-windows-task-launcher": "node native/runtime-host-windows-task-launcher/build.mjs",

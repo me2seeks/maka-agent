@@ -42,7 +42,7 @@ impl SessionHost {
         root: &Path,
         session: &OsStr,
     ) -> io::Result<Self> {
-        // App permits one unacknowledged send and one stop. Reserve both slots.
+        // App permits one unacknowledged send/answer and one stop.
         let (commands, mut requests) = async_mpsc::channel::<HostCommand>(2);
         let (notices, events) = async_mpsc::channel(8);
         let (shutdown, mut stop) = oneshot::channel();
@@ -77,6 +77,7 @@ impl SessionHost {
                             return Err(failure());
                         }
                         let mut pending = None;
+                        let mut answering: Option<String> = None;
                         let mut stopping = false;
                         let mut ready = false;
                         let mut history = false;
@@ -89,12 +90,17 @@ impl SessionHost {
                                     let _ = tokio::time::timeout(Duration::from_secs(1), writer.write(&HostCommand::Close)).await;
                                     break;
                                 }
-                                _ = tokio::time::sleep_until(deadline), if !ready || pending.is_some() => return Err(failure()),
+                                _ = tokio::time::sleep_until(deadline), if !ready || pending.is_some() || answering.is_some() => return Err(failure()),
                                 _ = tokio::time::sleep_until(stop_deadline), if stopping => return Err(failure()),
                                 request = requests.recv() => {
                                     let Some(request) = request else { break; };
+                                    if let HostCommand::Answer { id, .. } = &request {
+                                        if !ready || pending.is_some() || answering.is_some() || stopping { return Err(failure()); }
+                                        answering = Some(id.clone());
+                                        deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                                    }
                                     if let HostCommand::Send { revision, .. } = &request {
-                                        if !ready || pending.is_some() || stopping { return Err(failure()); }
+                                        if !ready || pending.is_some() || answering.is_some() || stopping { return Err(failure()); }
                                         pending = Some(*revision);
                                         deadline = tokio::time::Instant::now() + Duration::from_secs(15);
                                     }
@@ -128,6 +134,10 @@ impl SessionHost {
                                             pending = None;
                                         }
                                         HostEvent::Failed {} => return Err(failure()),
+                                        HostEvent::Answered { id, .. } => {
+                                            if answering.as_ref() != Some(id) { return Err(failure()); }
+                                            answering = None;
+                                        }
                                         _ => {}
                                     }
                                     tokio::select! {

@@ -47,6 +47,40 @@ def main():
         emitted = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", bytes(session.output))
         assert emitted.index("用户".encode()) < emitted.index("助手".encode()), "user must precede assistant"
         session.pump(0.4)
+        start = session.send(b"__e2e_ask_user_question__\r")
+        expect_compact(session, "有待处理请求", start)
+        session.send(b"\x1bOR")  # F3 opens, never auto-focuses a new request.
+        session.expect_text("首批发布范围选哪个")
+        session.send(b" \r")
+        session.expect_text("上线时间怎么安排")
+        session.send(b" \r")
+        session.expect_text("是否同步发布公告")
+        session.send(b" \r")
+        session.expect_text("确认以下回答")
+        session.send(b"\x1b[C\x1b[C\r")
+        expect_compact(session, "Fakequestionanswers:邀请制/本周/是")
+        session.pump(0.4)
+        start = session.send(b"__e2e_ask_sandbox_boundary__\r")
+        expect_compact(session, "有待处理请求", start)
+        session.send(b"\x1bOR")
+        session.expect_text("扩大当前会话的沙箱范围")
+        session.send(b"\r")  # Default is deny, not a broader session grant.
+        session.pump(0.4)
+        # A fresh-size frame also emits cells unchanged from the review overlay.
+        session.resize(81, 26)
+        expect_compact(session, "Fakesandboxboundarydecision:deny")
+        session.pump(0.4)
+        start = session.send(b"__e2e_ask_sandbox_boundary__\r")
+        expect_compact(session, "有待处理请求", start)
+        session.send(b"\x1bOR")
+        session.expect_text("扩大当前会话的沙箱范围", start)
+        session.send(b"\x1b[6~" * 8)  # Review to the bottom before approving.
+        session.pump(0.2)
+        session.send(b"\x1b[C\r")
+        session.pump(0.4)
+        session.resize(82, 28)
+        expect_compact(session, "Fakesandboxboundarydecision:allow", start)
+        session.pump(0.4)
         session.send(b"__e2e_hold_open__\r")
         expect_compact(session, "waitingforthetesttostop")
         start = session.send(b"\x03")
@@ -71,7 +105,7 @@ def main():
         session.completed()
     finally:
         session.close()
-    print("Host PTY: send, streamed response, stop, persisted history, direct exit passed")
+    print("Host PTY: send, streamed response, answered questions, stop, persisted history, direct exit passed")
 
 
 if __name__ == "__main__":

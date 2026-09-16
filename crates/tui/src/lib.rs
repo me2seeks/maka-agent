@@ -27,5 +27,6 @@ mod commands;
 pub mod composer;
 pub mod host_ui;
 mod i18n;
+mod interaction;
 mod text;
 pub mod transcript;

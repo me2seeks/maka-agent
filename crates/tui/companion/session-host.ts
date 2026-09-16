@@ -48,10 +48,18 @@ import {
   SESSION_TRANSCRIPT_BOOTSTRAP_MAX_BYTES,
   SESSION_TRANSCRIPT_PAGE_MAX_BYTES,
   type SessionContinuitySnapshot,
+  type InteractionPendingSnapshot,
   type SubscriptionFrame,
 } from '@maka/runtime-host/protocol';
 
 import { assertHostBaseline, HOST_BASELINE } from './host-baseline.ts';
+import {
+  InteractionProjectionState,
+  interactionAnswerForCommand,
+  pendingSnapshotsEqual,
+  type HostInteraction,
+  type InteractionAction,
+} from './interaction-projection.ts';
 
 const BRIDGE_VERSION = 1 as const;
 const MAX_LINE_BYTES = 384 * 1024;
@@ -68,7 +76,8 @@ const MAX_MESSAGE_BYTES = MAX_HISTORY_BYTES;
 const BOOTSTRAP_TIMEOUT_MS = 14_000;
 const COMMAND_TIMEOUT_MS = 15_000;
 const CLOSE_TIMEOUT_MS = 2_000;
-const FIXED_WAITING_NOTICE = '需要其他 Maka 客户端处理当前权限或交互请求';
+const FIXED_WAITING_NOTICE =
+  '当前有待处理的权限或交互请求，请在本客户端查看；不支持类型请在其他 Maka 客户端处理';
 const FIXED_REJECTED_NOTICE = 'Host 未接受该操作；输入已保留';
 
 type BlockKind = 'user' | 'assistant' | 'thinking' | 'tool';
@@ -80,19 +89,27 @@ export interface HostBlock {
   readonly text: string;
 }
 
-type HostEvent =
+export type HostEvent =
   | { readonly kind: 'hello'; readonly version: typeof BRIDGE_VERSION }
   | { readonly kind: 'history'; readonly blocks: readonly HostBlock[] }
+  | { readonly kind: 'interactions'; readonly requests: readonly HostInteraction[] }
   | { readonly kind: 'state'; readonly running: boolean; readonly waiting: boolean }
   | { readonly kind: 'ready'; readonly session_id: string }
   | { readonly kind: 'upsert'; readonly block: HostBlock }
   | { readonly kind: 'submitted'; readonly revision: number; readonly accepted: boolean }
+  | { readonly kind: 'answered'; readonly id: string; readonly accepted: boolean }
   | { readonly kind: 'stopped' }
   | { readonly kind: 'notice'; readonly text: string }
   | { readonly kind: 'failed' };
 
-type HostCommand =
+export type HostCommand =
   | { readonly kind: 'send'; readonly revision: number; readonly text: string }
+  | {
+      readonly kind: 'answer';
+      readonly id: string;
+      readonly action: InteractionAction;
+      readonly values: Readonly<Record<string, unknown>>;
+    }
   | { readonly kind: 'stop' }
   | { readonly kind: 'close' };
 
@@ -166,6 +183,50 @@ function resultContentText(value: unknown): string {
   return serializeValue(value);
 }
 
+const ANSI_ESCAPE = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\))/gu;
+
+function boundedUtf8Prefix(value: string, maxBytes: number): string {
+  let bytes = 0;
+  let result = '';
+  for (const character of value) {
+    const next = byteLength(character);
+    if (bytes + next > maxBytes) break;
+    result += character;
+    bytes += next;
+  }
+  return result;
+}
+
+/**
+ * Tool payloads are presentation previews only.  The durable message remains
+ * untouched; authorization review never calls this helper and therefore can
+ * never turn a truncated review into an affirmative permission prompt.
+ */
+function boundedToolPreview(value: string): string {
+  const withoutAnsi = value.replace(ANSI_ESCAPE, '');
+  let removedControl = withoutAnsi !== value;
+  let cleaned = '';
+  for (const character of withoutAnsi) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (
+      (codePoint < 0x20 || (codePoint >= 0x7f && codePoint <= 0x9f)) &&
+      character !== '\n' &&
+      character !== '\t'
+    ) {
+      removedControl = true;
+      continue;
+    }
+    cleaned += character;
+  }
+  if (!removedControl && byteLength(cleaned) <= MAX_BLOCK_TEXT_BYTES) return cleaned;
+  const suffix = removedControl
+    ? byteLength(cleaned) > MAX_BLOCK_TEXT_BYTES
+      ? '\n[工具预览：终端控制字符已移除且已截断，原文保留]'
+      : '\n[工具预览：终端控制字符已移除，原文保留]'
+    : '\n[工具预览已截断，原文保留]';
+  return `${boundedUtf8Prefix(cleaned, MAX_BLOCK_TEXT_BYTES - byteLength(suffix))}${suffix}`;
+}
+
 function messageId(value: StoredMessage): string {
   const id = (value as { id?: unknown }).id;
   if (typeof id !== 'string' || id.length === 0) {
@@ -203,7 +264,7 @@ function messageBlocks(message: StoredMessage): HostBlock[] {
           id,
           kind: 'tool',
           title: `工具：${message.displayName ?? message.toolName}`,
-          text: message.intent ?? serializeValue(message.args),
+          text: boundedToolPreview(message.intent ?? serializeValue(message.args)),
         },
       ];
     case 'tool_result':
@@ -212,7 +273,7 @@ function messageBlocks(message: StoredMessage): HostBlock[] {
           id,
           kind: 'tool',
           title: message.isError ? '工具结果：错误' : '工具结果',
-          text: resultContentText(message.content),
+          text: boundedToolPreview(resultContentText(message.content)),
         },
       ];
     case 'permission_decision':
@@ -517,6 +578,22 @@ function exactKeys(value: Record<string, unknown>, expected: readonly string[]):
   return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isAnswerValue(value: unknown): boolean {
+  return (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    (Array.isArray(value) && value.every((candidate) => typeof candidate === 'string'))
+  );
+}
+
 function parseCommand(line: Buffer): HostCommand {
   let value: unknown;
   try {
@@ -543,9 +620,50 @@ function parseCommand(line: Buffer): HostCommand {
       text: record.text as string,
     };
   }
+  if (record.kind === 'answer') {
+    if (!exactKeys(record, ['kind', 'id', 'action', 'values'])) throw fixedFailure();
+    if (
+      typeof record.id !== 'string' ||
+      record.id.length === 0 ||
+      byteLength(record.id) > 256 ||
+      !record.id.isWellFormed() ||
+      hasForbiddenControl(record.id, false) ||
+      typeof record.action !== 'string' ||
+      !(['allow', 'deny', 'accept', 'decline', 'cancel'] as readonly string[]).includes(
+        record.action,
+      ) ||
+      !isPlainRecord(record.values)
+    ) {
+      throw fixedFailure();
+    }
+    const values = record.values as Record<string, unknown>;
+    if (Object.keys(values).length > 32) throw fixedFailure();
+    for (const [name, value] of Object.entries(values)) {
+      if (name.length === 0 || byteLength(name) > 256 || !name.isWellFormed()) throw fixedFailure();
+      if (hasForbiddenControl(name, false) || !isAnswerValue(value)) throw fixedFailure();
+      if (serializedAnswerValueBytes(value) > 16 * 1024) throw fixedFailure();
+    }
+    return {
+      kind: 'answer',
+      id: record.id,
+      action: record.action as InteractionAction,
+      values,
+    };
+  }
   if (record.kind === 'stop' && exactKeys(record, ['kind'])) return { kind: 'stop' };
   if (record.kind === 'close' && exactKeys(record, ['kind'])) return { kind: 'close' };
   throw fixedFailure();
+}
+
+function serializedAnswerValueBytes(value: unknown): number {
+  let encoded: string | undefined;
+  try {
+    encoded = JSON.stringify(value);
+  } catch {
+    throw fixedFailure();
+  }
+  if (encoded === undefined) throw fixedFailure();
+  return byteLength(encoded);
 }
 
 async function readCommands(input: Readable, queue: AsyncQueue<HostCommand>): Promise<void> {
@@ -614,11 +732,13 @@ interface BridgeContext {
   readonly subscription: RuntimeHostSessionSubscription;
   readonly sessionId: string;
   readonly projection: Projection;
+  readonly interactionProjection: InteractionProjectionState;
   readonly deltas: Map<string, string>;
   readonly gate: AsyncMutex;
   latestSnapshot: SessionContinuitySnapshot;
   transcriptWatermark: number | null;
   lastWaiting: boolean;
+  answerInFlight: string | null;
   closing: boolean;
   failed: boolean;
 }
@@ -645,6 +765,11 @@ async function emitState(ctx: BridgeContext, initial = false): Promise<void> {
     await emit(ctx, { kind: 'notice', text: FIXED_WAITING_NOTICE });
   }
   ctx.lastWaiting = state.waiting;
+}
+
+async function emitInteractions(ctx: BridgeContext): Promise<void> {
+  const requests = ctx.interactionProjection.project(ctx.latestSnapshot.interactions.pending);
+  await emit(ctx, { kind: 'interactions', requests });
 }
 
 async function emitMessageBlocks(ctx: BridgeContext, message: StoredMessage): Promise<void> {
@@ -745,6 +870,126 @@ async function loadInitialTranscript(
   );
 }
 
+type AnswerCommand = Extract<HostCommand, { readonly kind: 'answer' }>;
+
+function interactionOperationIsStale(error: unknown): boolean {
+  return (
+    error instanceof RuntimeHostOperationError &&
+    (error.code === 'not_found' || error.code === 'already_resolved')
+  );
+}
+
+async function emitAnswerReceipt(
+  ctx: BridgeContext,
+  id: string,
+  accepted: boolean,
+  resolved: boolean,
+): Promise<void> {
+  if (resolved) ctx.interactionProjection.markResolved(id);
+  await emit(ctx, { kind: 'answered', id, accepted });
+  // The receipt is correlated with the exact answer intent.  The following
+  // event is always a complete pending projection, never a local partial diff.
+  await emitInteractions(ctx);
+}
+
+async function handleInteractionAnswer(
+  ctx: BridgeContext,
+  command: AnswerCommand,
+): Promise<boolean> {
+  if (ctx.answerInFlight !== null)
+    throw new BridgeFailure('multiple Interaction answers in flight');
+  ctx.answerInFlight = command.id;
+  try {
+    let pending: InteractionPendingSnapshot | undefined =
+      ctx.latestSnapshot.interactions.pending.find(
+        (candidate) => candidate.interactionId === command.id,
+      );
+    if (!pending) {
+      // The projection is authoritative for what this peer was shown.  A
+      // missing identity is definitively stale; do not send an answer for a
+      // request that may already belong to another client.
+      await emitAnswerReceipt(ctx, command.id, false, true);
+      return !ctx.closing;
+    }
+    const displayed = pending;
+
+    try {
+      const queried = await requestWithDeadline(
+        ctx.connection.request('interaction.query', {
+          sessionId: ctx.sessionId,
+          interactionId: command.id,
+        }),
+        COMMAND_TIMEOUT_MS,
+      );
+      if (queried.sessionId !== ctx.sessionId || queried.interactionId !== command.id) {
+        throw new BridgeFailure('Interaction query identity mismatch');
+      }
+      if (queried.status !== 'pending') {
+        await emitAnswerReceipt(ctx, command.id, false, true);
+        return !ctx.closing;
+      }
+      if (!pendingSnapshotsEqual(displayed, queried)) {
+        throw new BridgeFailure('Interaction query changed the displayed request');
+      }
+      pending = queried;
+    } catch (error) {
+      if (error instanceof BridgeFailure) throw error;
+      await emitAnswerReceipt(ctx, command.id, false, interactionOperationIsStale(error));
+      if (!interactionOperationIsStale(error)) {
+        await emit(ctx, { kind: 'notice', text: FIXED_REJECTED_NOTICE });
+      }
+      return !ctx.closing;
+    }
+
+    const answer = interactionAnswerForCommand(
+      pending,
+      command,
+      ctx.interactionProjection.presentedKind(command.id),
+    );
+    if (!answer) {
+      await emitAnswerReceipt(ctx, command.id, false, false);
+      await emit(ctx, { kind: 'notice', text: FIXED_REJECTED_NOTICE });
+      return !ctx.closing;
+    }
+
+    try {
+      const resolved = await requestWithDeadline(
+        ctx.connection.request('interaction.answer', {
+          sessionId: ctx.sessionId,
+          interactionId: command.id,
+          answer,
+        }),
+        COMMAND_TIMEOUT_MS,
+      );
+      if (
+        resolved.sessionId !== ctx.sessionId ||
+        resolved.interactionId !== command.id ||
+        resolved.status !== 'answered'
+      ) {
+        throw new BridgeFailure('Interaction answer receipt identity mismatch');
+      }
+      await emitAnswerReceipt(ctx, command.id, true, true);
+    } catch (error) {
+      if (error instanceof BridgeFailure) throw error;
+      const stale = interactionOperationIsStale(error);
+      if (
+        !(error instanceof RuntimeHostOperationError) ||
+        error.code === 'internal_failure' ||
+        error.code === 'outcome_unknown'
+      )
+        throw error;
+      await emitAnswerReceipt(ctx, command.id, false, stale);
+      // Command interruption has an unknown outcome after dispatch.  The
+      // bridge deliberately does not retry; the full projection lets another
+      // Host client (or a later query) establish the canonical state.
+      if (!stale) await emit(ctx, { kind: 'notice', text: FIXED_REJECTED_NOTICE });
+    }
+    return !ctx.closing;
+  } finally {
+    ctx.answerInFlight = null;
+  }
+}
+
 async function consumeSubscription(ctx: BridgeContext): Promise<void> {
   try {
     for await (const frame of ctx.subscription) {
@@ -762,6 +1007,7 @@ async function acceptFrame(ctx: BridgeContext, frame: SubscriptionFrame): Promis
     case 'subscription.session_projection':
       ctx.latestSnapshot = frame.snapshot;
       await emitState(ctx);
+      await emitInteractions(ctx);
       return;
     case 'subscription.session_delta': {
       const delta = frame.delta;
@@ -808,6 +1054,9 @@ async function handleCommand(ctx: BridgeContext, command: HostCommand): Promise<
     ctx.closing = true;
     return false;
   }
+  if (command.kind === 'answer') {
+    return ctx.gate.run(() => handleInteractionAnswer(ctx, command));
+  }
   if (command.kind === 'send') {
     return ctx.gate.run(async () => {
       const messageId = randomUUID();
@@ -841,7 +1090,11 @@ async function handleCommand(ctx: BridgeContext, command: HostCommand): Promise<
           });
         }
       } catch (error) {
-        if (error instanceof RuntimeHostOperationError) {
+        if (
+          error instanceof RuntimeHostOperationError &&
+          error.code !== 'internal_failure' &&
+          error.code !== 'outcome_unknown'
+        ) {
           await emit(ctx, { kind: 'submitted', revision: command.revision, accepted: false });
           await emit(ctx, { kind: 'notice', text: FIXED_REJECTED_NOTICE });
         } else {
@@ -946,16 +1199,19 @@ export async function runSessionHost(
       subscription,
       sessionId,
       projection,
+      interactionProjection: new InteractionProjectionState(),
       deltas: new Map(),
       gate: new AsyncMutex(),
       latestSnapshot: subscription.snapshot,
       transcriptWatermark: subscription.transcriptBootstrap?.throughSequence ?? null,
       lastWaiting: false,
+      answerInFlight: null,
       closing: false,
       failed: false,
     };
     await writer.write({ kind: 'history', blocks: projection.blocks() });
     await emitState(ctx, true);
+    await emitInteractions(ctx);
     await writer.write({ kind: 'ready', session_id: sessionId });
     if (ctx.lastWaiting) await writer.write({ kind: 'notice', text: FIXED_WAITING_NOTICE });
     const queue = new AsyncQueue<HostCommand>(MAX_INPUT_QUEUE_ENTRIES);

@@ -20,6 +20,88 @@
 //! Narrow presentation messages from the pinned TS Host client, not Host facts.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// A bounded, declarative interaction projected by the pinned TS client.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct HostInteraction {
+    /// Host-owned request identity, never an array position.
+    pub id: String,
+    /// Sandbox boundary, client capability, question, form, or unsupported request.
+    pub kind: String,
+    /// Plain display heading.
+    pub title: String,
+    /// Display provenance; not an authorization identity.
+    pub source: String,
+    /// Complete review text; the client must not silently truncate it.
+    pub detail: String,
+    /// Declarative fields; empty for permissions.
+    pub fields: Vec<HostField>,
+}
+
+/// A form field using the existing Host field vocabulary.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostField {
+    /// Stable field key used in answers.
+    pub name: String,
+    /// Plain field caption.
+    pub label: String,
+    /// Host field kind, or question for a choice with free text.
+    pub kind: String,
+    /// Whether omission is invalid.
+    pub required: bool,
+    /// Optional explanation.
+    #[serde(default)]
+    pub description: String,
+    /// Host-provided initial value; never submitted implicitly.
+    #[serde(default)]
+    pub default: serde_json::Value,
+    /// Choice values and captions.
+    #[serde(default)]
+    pub options: Vec<HostOption>,
+    /// Minimum Unicode length.
+    pub min_length: Option<usize>,
+    /// Maximum Unicode length.
+    pub max_length: Option<usize>,
+    /// Optional string format checked by Host on submission.
+    pub format: Option<String>,
+    /// Inclusive numeric minimum.
+    pub minimum: Option<f64>,
+    /// Inclusive numeric maximum.
+    pub maximum: Option<f64>,
+    /// Minimum number of selected values.
+    pub min_items: Option<usize>,
+    /// Maximum number of selected values.
+    pub max_items: Option<usize>,
+}
+
+/// One declared choice, with distinct wire value and display caption.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct HostOption {
+    /// Exact canonical answer value.
+    pub value: String,
+    /// Plain display caption.
+    pub label: String,
+}
+
+/// Explicit decisions; never includes persistent grants in this UI slice.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InteractionAction {
+    /// Allow this one permission request.
+    Allow,
+    /// Deny this permission request.
+    Deny,
+    /// Submit form or question values.
+    Accept,
+    /// Decline a form.
+    Decline,
+    /// Cancel a form or skip a question request.
+    Cancel,
+}
 
 /// A bounded display block. Its identity is scoped to the selected session.
 #[derive(Debug, Deserialize)]
@@ -53,6 +135,18 @@ pub enum HostBlockKind {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostEvent {
+    /// Complete current pending-interaction projection.
+    Interactions {
+        /// Host-owned pending requests, bounded to sixteen.
+        requests: Vec<HostInteraction>,
+    },
+    /// Definitive receipt for the one outstanding answer intent.
+    Answered {
+        /// Exact request answered by the user.
+        id: String,
+        /// Whether Host committed that answer.
+        accepted: bool,
+    },
     /// Private protocol pairing, consumed before any UI event.
     Hello {
         /// Local bridge protocol version.
@@ -102,6 +196,15 @@ pub enum HostEvent {
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostCommand {
+    /// Answer one exact pending interaction through the Host.
+    Answer {
+        /// Host request identity retained from the displayed projection.
+        id: String,
+        /// Explicit user decision.
+        action: InteractionAction,
+        /// Form values keyed by declared field name only.
+        values: BTreeMap<String, serde_json::Value>,
+    },
     /// Submit text exactly once.
     Send {
         /// Local revision to correlate the receipt with the retained input.

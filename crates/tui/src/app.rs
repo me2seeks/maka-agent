@@ -31,8 +31,10 @@ use ratatui::{
 use crate::{
     commands::{Command, Commands, Entry},
     composer::{Composer, Edit, VerticalDirection},
-    host_ui::{HostBlock, HostBlockKind, HostCommand, HostEvent},
-    i18n, text,
+    host_ui::{HostBlock, HostBlockKind, HostCommand, HostEvent, HostInteraction},
+    i18n,
+    interaction::{InteractionPanel, valid_requests},
+    text,
     transcript::{Block, BlockKind, Reading, Transcript, TranscriptError},
 };
 
@@ -101,10 +103,13 @@ struct HostView {
     session: String,
     ready: bool,
     running: bool,
+    waiting: bool,
     pending: Option<u64>,
     stop_pending: bool,
     identities: Vec<String>,
     command: Option<HostCommand>,
+    interactions: Vec<HostInteraction>,
+    answering: Option<String>,
 }
 
 /// Terminal state and user intents; Host I/O remains owned by the caller.
@@ -132,6 +137,8 @@ pub struct App {
     companion: Option<CompanionState>,
     echo_requested: bool,
     host: Option<HostView>,
+    interaction: Option<InteractionPanel>,
+    interaction_open: bool,
 }
 
 impl App {
@@ -195,6 +202,8 @@ impl App {
             companion: None,
             echo_requested: false,
             host: None,
+            interaction: None,
+            interaction_open: false,
         }
     }
 
@@ -205,10 +214,13 @@ impl App {
             session,
             ready: false,
             running: false,
+            waiting: false,
             pending: None,
             stop_pending: false,
             identities: Vec::new(),
             command: None,
+            interactions: Vec::new(),
+            answering: None,
         });
         app.set_status("正在连接 Host 并加载会话…");
         app
@@ -225,6 +237,32 @@ impl App {
             return false;
         };
         let accepted = match event {
+            HostEvent::Interactions { requests } if valid_requests(&requests) => {
+                if let Some(panel) = &mut self.interaction
+                    && !requests.iter().any(|request| request == &panel.request)
+                {
+                    panel.expire();
+                }
+                host.interactions = requests;
+                true
+            }
+            HostEvent::Answered { id, accepted } if host.answering.as_ref() == Some(&id) => {
+                host.answering = None;
+                if accepted {
+                    host.interactions.retain(|request| request.id != id);
+                    self.interaction = None;
+                    self.interaction_open = false;
+                    self.consumed_overlay_key = Some(KeyCode::Enter);
+                } else if let Some(panel) = &mut self.interaction {
+                    panel.reject();
+                }
+                self.set_status(if accepted {
+                    "Host 已确认回答"
+                } else {
+                    "回答未提交：请求可能已结束或内容不符合要求；未自动重试"
+                });
+                true
+            }
             HostEvent::Ready { session_id } if !host.ready && host.session == session_id => {
                 host.ready = true;
                 self.set_status("已连接 · Enter 发送 · 运行时 Ctrl+C 停止");
@@ -247,14 +285,18 @@ impl App {
                 Self::host_block(&mut self.transcript, &mut host.identities, block).is_ok()
             }
             HostEvent::State { running, waiting } => {
+                let changed = host.running != running || host.waiting != waiting;
                 host.running = running;
-                self.set_status(if waiting {
-                    "需要用户处理：请在现有 Maka 客户端中完成权限或交互请求"
-                } else if running {
-                    "正在运行 · Ctrl+C 停止"
-                } else {
-                    "就绪 · Enter 发送"
-                });
+                host.waiting = waiting;
+                if changed {
+                    self.set_status(if waiting {
+                        "等待你的处理 · F3 或 /requests 查看；不会自动授权"
+                    } else if running {
+                        "正在运行 · Ctrl+C 停止"
+                    } else {
+                        "就绪 · Enter 发送"
+                    });
+                }
                 true
             }
             HostEvent::Submitted { revision, accepted } if host.pending == Some(revision) => {
@@ -287,8 +329,12 @@ impl App {
                 host.ready = false;
                 host.running = false;
                 host.command = None;
+                host.interactions.clear();
             }
-            self.set_status("Host 已断开；输入已保留。未确认的发送结果未知，不会自动重发");
+            if let Some(panel) = &mut self.interaction {
+                panel.expire();
+            }
+            self.set_status("Host 已断开；输入已保留。未确认的发送或回答结果未知，不会自动重试");
         }
         accepted
     }
@@ -318,6 +364,58 @@ impl App {
         Ok(())
     }
 
+    fn open_interaction(&mut self) {
+        let Some(host) = &self.host else {
+            self.set_status("当前未连接 Host，没有真实交互请求");
+            return;
+        };
+        if !host.ready || host.answering.is_some() {
+            self.set_status("尚未连接或正在等待回答确认，请稍候");
+            return;
+        }
+        if self.interaction.as_ref().is_some_and(|panel| {
+            host.interactions
+                .iter()
+                .any(|request| request == &panel.request)
+        }) {
+            self.interaction_open = true;
+        } else if let Some(request) = host
+            .interactions
+            .iter()
+            .find(|request| request.kind != "unsupported")
+            .or_else(|| host.interactions.first())
+        {
+            self.interaction = Some(InteractionPanel::new(request.clone()));
+            self.interaction_open = true;
+        } else {
+            self.set_status("当前没有待处理请求");
+        }
+    }
+
+    fn answer_interaction(&mut self, command: HostCommand) {
+        let HostCommand::Answer { id, .. } = &command else {
+            return;
+        };
+        let Some(host) = &mut self.host else {
+            return;
+        };
+        if !host.ready
+            || host.answering.is_some()
+            || host.pending.is_some()
+            || host.stop_pending
+            || !host.interactions.iter().any(|request| &request.id == id)
+        {
+            self.set_status("当前不能回答：请求已结束或仍有操作等待确认");
+            return;
+        }
+        host.answering = Some(id.clone());
+        host.command = Some(command);
+        if let Some(panel) = &mut self.interaction {
+            panel.set_pending(true);
+        }
+        self.set_status("正在提交回答，等待 Host 确认…");
+    }
+
     fn send_to_host(&mut self) {
         let Some(host) = &mut self.host else {
             self.set_status(i18n::CHAT_SEND_UNAVAILABLE);
@@ -333,6 +431,10 @@ impl App {
         }
         if host.stop_pending {
             self.set_status("正在等待停止确认，请稍后发送");
+            return;
+        }
+        if host.answering.is_some() {
+            self.set_status("正在等待 Host 确认回答，请稍后发送");
             return;
         }
         if self.composer.text().trim().is_empty() {
@@ -514,6 +616,9 @@ impl App {
     pub fn update(&mut self, event: Event) {
         match event {
             Event::Resize(width, height) => {
+                if let Some(panel) = &mut self.interaction {
+                    panel.invalidate();
+                }
                 if let Some(commands) = &mut self.commands {
                     commands.resize(width, height);
                 }
@@ -540,6 +645,11 @@ impl App {
                     self.key(key);
                 }
             }
+            Event::Paste(value) if self.interaction_open => {
+                if let Some(panel) = &mut self.interaction {
+                    panel.paste(&value);
+                }
+            }
             Event::Paste(value) if self.commands.is_some() => {
                 if let Some(commands) = &mut self.commands {
                     commands.paste(&value);
@@ -551,6 +661,20 @@ impl App {
                     && self.focus == Focus::Composer =>
             {
                 self.edit(Edit::Insert(value))
+            }
+            Event::Mouse(mouse) if self.interaction_open => {
+                if let Some(panel) = &mut self.interaction {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => panel.wheel(false),
+                        MouseEventKind::ScrollDown => panel.wheel(true),
+                        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                            if let Some(command) = panel.click(mouse.column, mouse.row) {
+                                self.answer_interaction(command);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
             Event::Mouse(mouse) if self.overlay.is_none() && self.geometry_published => {
                 if let Some(commands) = &mut self.commands {
@@ -589,6 +713,18 @@ impl App {
     fn key(&mut self, key: KeyEvent) {
         let pressed = key.kind == KeyEventKind::Press;
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.interaction_open
+            && let Some(panel) = &mut self.interaction
+        {
+            if pressed && key.code == KeyCode::Esc && key.modifiers.is_empty() {
+                self.interaction_open = false;
+                self.consumed_overlay_key = Some(KeyCode::Esc);
+            } else if let Some(command) = panel.key(key) {
+                self.answer_interaction(command);
+                self.consumed_overlay_key = Some(key.code);
+            }
+            return;
+        }
         if let Some(commands) = &mut self.commands {
             if pressed && key.code == KeyCode::Esc && key.modifiers.is_empty() {
                 self.commands = None;
@@ -683,7 +819,7 @@ impl App {
                     self.set_status("已请求停止，等待 Host 确认…");
                     return;
                 }
-                if host.ready && host.pending.is_some() {
+                if host.ready && (host.pending.is_some() || host.answering.is_some()) {
                     self.set_status("正在等待发送确认；连接中断时不会自动重发");
                     return;
                 }
@@ -710,7 +846,9 @@ impl App {
                 });
             }
             KeyCode::F(3) if pressed => {
-                if let Some(permission) = &self.permission {
+                if self.host.is_some() {
+                    self.open_interaction();
+                } else if let Some(permission) = &self.permission {
                     self.overlay = Some(Overlay::Permission(permission.key));
                     self.overlay_actions_visible = false;
                 } else {
@@ -768,6 +906,7 @@ impl App {
     fn run_command(&mut self, command: Command) {
         self.commands = None;
         match command {
+            Command::Requests => self.open_interaction(),
             Command::Help => self.overlay = Some(Overlay::Help),
             Command::Latest => {
                 self.transcript.follow_latest();
@@ -978,13 +1117,18 @@ impl App {
                         "{}{}{}",
                         self.companion_badge(),
                         if let Some(host) = &self.host {
-                            if host.ready {
-                                "Maka · 已连接 TS Host"
+                            if host.ready && !host.interactions.is_empty() {
+                                format!(
+                                    "Maka · 有待处理请求（{} 项，逐个处理）· F3",
+                                    host.interactions.len()
+                                )
+                            } else if host.ready {
+                                "Maka · 已连接 TS Host".into()
                             } else {
-                                "Maka · Host 未连接"
+                                "Maka · Host 未连接".into()
                             }
                         } else {
-                            i18n::CHAT_TITLE
+                            i18n::CHAT_TITLE.into()
                         },
                         if self.input_warning().is_some() {
                             " [INPUT!]"
@@ -1066,6 +1210,11 @@ impl App {
         if let Some(commands) = &mut self.commands {
             commands.render(frame);
         }
+        if self.interaction_open
+            && let Some(panel) = &mut self.interaction
+        {
+            panel.render(frame, area);
+        }
         self.geometry_published = true;
     }
 
@@ -1131,7 +1280,11 @@ impl App {
             .map(|line| Line::raw(line.text.as_str()))
             .collect();
         frame.render_widget(Paragraph::new(display), area);
-        if self.focus == Focus::Composer && self.overlay.is_none() && self.commands.is_none() {
+        if self.focus == Focus::Composer
+            && self.overlay.is_none()
+            && self.commands.is_none()
+            && !self.interaction_open
+        {
             let row = u16::try_from(current.saturating_sub(top))
                 .unwrap_or(0)
                 .min(area.height.saturating_sub(1));
@@ -1269,6 +1422,62 @@ mod tests {
             .chunks(usize::from(width.max(1)))
             .map(|row| row.iter().map(|cell| cell.symbol()).collect())
             .collect()
+    }
+
+    #[test]
+    fn host_interaction_keeps_focus_and_requires_correlated_receipt() {
+        let mut app = App::host_session("session-1".into());
+        app.host_event(HostEvent::Ready {
+            session_id: "session-1".into(),
+        });
+        app.update(Event::Paste("尚未发送".into()));
+        let request = HostInteraction {
+            id: "permission-1".into(),
+            kind: "sandbox_boundary".into(),
+            title: "执行工具".into(),
+            source: "Host".into(),
+            detail: "完整的执行范围".into(),
+            fields: Vec::new(),
+        };
+        assert!(app.host_event(HostEvent::Interactions {
+            requests: vec![request.clone()]
+        }));
+        assert!(!app.interaction_open);
+        app.update(key(KeyCode::F(3)));
+        draw(&mut app, 80, 24);
+        app.update(key(KeyCode::Esc));
+        assert!(!app.interaction_open);
+        assert_eq!(app.composer.text(), "尚未发送");
+        app.update(key(KeyCode::F(3)));
+        draw(&mut app, 80, 24);
+        app.update(key(KeyCode::Enter));
+        assert!(matches!(
+            app.take_host_command(),
+            Some(HostCommand::Answer {
+                action: crate::host_ui::InteractionAction::Deny,
+                ..
+            })
+        ));
+        app.update(key(KeyCode::Esc));
+        assert!(app.host.as_ref().unwrap().answering.is_some());
+        assert!(app.host_event(HostEvent::Answered {
+            id: request.id.clone(),
+            accepted: false
+        }));
+        app.host_event(HostEvent::State {
+            running: false,
+            waiting: false,
+        });
+        assert!(app.status_text().contains("回答未提交"));
+        app.host_event(HostEvent::Interactions {
+            requests: Vec::new(),
+        });
+        app.answer_interaction(HostCommand::Answer {
+            id: request.id,
+            action: crate::host_ui::InteractionAction::Allow,
+            values: Default::default(),
+        });
+        assert!(app.take_host_command().is_none());
     }
 
     #[test]

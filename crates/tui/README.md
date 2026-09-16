@@ -85,7 +85,7 @@ npm run dev:maka-tui -- --isolated-real
 
 This is the real-model entry. It creates/connects an independently marked production Host only at `crates/tui/.development/epoch154`, which is Git-ignored. On first use, choose the provider, base URL and model ID, then enter an API key locally without echo; the Host saves the connection. It does not read your existing Host's configuration or sessions. The isolated candidate disables ambient OpenAI, Anthropic and DeepSeek bootstrap credentials. It never silently selects the free model. Saving may query the chosen provider's model catalog; model generation starts only when you explicitly send in chat.
 
-Later launches reuse the isolated connection and history. Exit retains data; a Host started by this launcher closes when the launcher exits. The directory contains credentials and chat data: do not share or commit it. Incompatible existing Hosts are rejected, not upgraded. Real Host startup and configuration cancellation have been verified; provider authentication and generation require your local configuration and remain unverified. Permission answers are still pending, so tools may wait for approval.
+Later launches reuse the isolated connection and history. Exit retains data; a Host started by this launcher closes when the launcher exits. The directory contains credentials and chat data: do not share or commit it. Incompatible existing Hosts are rejected, not upgraded. Automated tests use FakeBackend, not real models; provider authentication and generation need local configuration and validation. Open pending tool approvals with F3.
 
 For credential-free protocol/interaction tests instead:
 
@@ -124,12 +124,21 @@ Idle Ctrl+C exits immediately without a discard confirmation. Unsent input is
 memory-only and is not saved on exit. Disconnection leaves unacknowledged command
 outcomes unknown; there is no automatic resend.
 
-The native `--connect` entry still selects one existing session explicitly; the development launcher provides startup selection and creation. In-chat session switching,
-attachments, permission answers, plugin UI and automatic recovery remain
-pending. Handle permission/interaction requests in an existing Maka client.
+The native `--connect` entry still selects one existing session explicitly; the development launcher provides startup selection and creation. In-chat session switching, attachments, plugin UI and automatic recovery remain pending.
+
+### Permissions, Agent questions and forms
+
+Incoming Host requests show a notice without taking chat input focus. F3 or `/requests` in the command list opens a request. Esc returns to chat and retains answers in process; it does not submit cancellation. Authorization defaults to deny. Approval requires scrolling to the end of the complete review before explicitly choosing it. Epoch-154 sandbox expansion and client-capability grants affect subsequent calls in the current session, so the button explicitly says “approve session scope,” not “allow once.” Forms support text, numbers, integers, booleans, single-select and multi-select; Agent questions also allow free text. Use arrows to move, Space to select, and Enter/Tab to advance, followed by a separate submission review. Shift+Enter/Ctrl+J inserts a newline in text; F2 cancels an answer even before required fields are filled. Action buttons support mouse clicks; options currently use the keyboard.
+
+Answers require a Host query, validation and receipt. Pending submissions cannot repeat; expired requests are disabled. Interaction actions require at least 40×10 terminal cells. Input and answers are bounded; approval is unavailable when the full review cannot be presented. Legacy permission and unknown request kinds are explicitly unsupported, never mapped to a generic approval.
+
+MCP or plugins using the Host's existing declarative forms can share this renderer. This is not a TUI plugin runtime or proof of end-to-end MCP acceptance. The Companion does not register an MCP capability provider or load MCP servers itself. The Host still owns execution and persistence.
+
+Multiple requests show a count and are handled sequentially; after submitting or cancelling the current request, use F3 for the next one. Tool output may use explicitly labelled truncation/control-character-cleaning previews, with originals retained by the Host. Authorization reviews never use truncated previews.
+
 Send/display limits are 16 KiB per body and 128 blocks/256 KiB overall; excess history stops the
 connection with a notice, not a claim of complete history. Isolated Linux Host +
-FakeBackend PTY checks cover actual send/receive/stop, not real models, IME or
+FakeBackend PTY checks cover actual send/receive, question answers, sandbox denial and stop, not real models, IME or
 cross-platform acceptance.
 
 ### Pinned TS Host read-only probe
@@ -228,4 +237,4 @@ Resident transcript admission is limited to 128 blocks, 16 KiB per body and 256 
 
 Resident reflow and draft layout are synchronous and recomputed from bounded source, including per-grapheme cursor stops. Source-byte budgets do not equal actual heap usage or guarantee frame latency. This is not a paged/virtualized production reader or a 50 MiB history benchmark.
 
-M0 still needs a same-release Companion echo, congestion/lifecycle tests, read-only real Host attachment, copy/IME and actual emulator checks, cross-platform qualification and measured latency/resource budgets. Further milestones add structured drafts, real permissions/stop/recovery, Markdown/search, full command/workflow coverage and packaging. There is no dependency-notice artifact or released binary integration yet. Do not replace the default TUI or claim the rewrite complete from this prototype.
+M0 still needs congestion/lifecycle qualification, copy/IME and actual emulator checks, cross-platform qualification and measured latency/resource budgets. Further milestones add session switching, attachments, disconnection recovery, Markdown/search, full command/workflow coverage and packaging. There is no dependency-notice artifact or released binary integration yet. Do not replace the default TUI or claim the rewrite complete from this prototype.
